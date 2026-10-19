@@ -1,0 +1,61 @@
+[app]
+environment = "simulation"
+tribunal = "TRIBUNAL_NAO_CONFIGURADO"
+base_url = "https://pje.exemplo.jus.br/pje/login.seam"
+selectors_approved = false
+allow_live_submission = false
+# Referencia do documento em que o advogado autoriza o uso do A1 (contrato, termo etc.)
+require_authorization_ref = true
+
+[browser]
+engine = "chromium"
+channel = "msedge"
+headless = false
+timeout_ms = 30000
+
+# Formatos aceitos: css=..., label=..., text=..., role=button|name=...
+# Os valores abaixo sao candidatos genericos e PRECISAM ser homologados no tribunal alvo.
+[selectors]
+# Opcional, para login centralizado (PDPJ/SSO): botao clicado antes do certificado.
+# login_sso_button = ["role=button|name=Entrar com PDPJ"]
+login_certificate_button = ["role=button|name=Certificado digital", "text=Certificado digital"]
+registration_form = ["text=Confirmar dados e prosseguir"]
+detected_name = ["label=Nome", "css=input[name*='nome']"]
+detected_cpf = ["label=CPF", "css=input[name*='cpf']"]
+detected_oab = ["label=Inscricao OAB", "css=input[name*='oab']"]
+email = ["label=Endereco de e-mail", "label=E-mail"]
+phone = ["label=Telefone", "label=Celular"]
+cep = ["label=CEP"]
+logradouro = ["label=Logradouro", "label=Endereco"]
+address_number = ["label=Numero"]
+complemento = ["label=Complemento"]
+bairro = ["label=Bairro"]
+cidade = ["label=Cidade", "label=Municipio"]
+uf = ["label=UF", "label=Estado"]
+confirm_data = ["role=button|name=Confirmar dados e prosseguir", "text=Confirmar dados e prosseguir"]
+commitment_term = ["text=Termo de compromisso", "text=informacoes sobre o uso do sistema"]
+sign_term = ["role=button|name=Assinar termo de compromisso", "text=Assinar termo de compromisso"]
+completion = ["text=cadastro foi concluido", "text=cadastro concluido"]
+lawyer_panel = ["text=Painel do advogado", "text=Painel do usuario"]
+second_factor = ["text=codigo de autenticacao", "text=segundo fator"]
+second_factor_input = ["label=Codigo", "css=input[name*='otp']", "css=input[name*='codigo']"]
+second_factor_submit = ["role=button|name=Validar", "role=button|name=Confirmar", "role=button|name=Entrar"]
+
+[stop_markers]
+captcha = ["captcha", "nao sou um robo", "recaptcha"]
+certificate_error = ["certificado invalido", "certificado expirado", "certificado revogado", "erro no certificado"]
+access_blocked = ["acesso bloqueado", "acesso negado", "usuario bloqueado", "forbidden"]
+jus_postulandi = ["jus postulandi", "juspostulandi"]
+
+
+# Janela "Selecao de certificado" do PJeOffice PRO (Java), operada pelo Java Access Bridge.
+# Ligue o bridge uma vez e reinicie o PJeOffice:
+#   & "C:\Program Files\PJeOffice Pro\jre\bin\jabswitch.exe" -enable
+# Para inspecionar a janela aberta: python -m pje_rpa inspect-signer
+[signer]
+window_title_regex = '(?i)sele\w+o de certificado'
+appear_timeout_s = 45
+max_dialogs = 4
+jab_dll = 'C:\Program Files\PJeOffice Pro\jre\bin\WindowsAccessBridge-64.dll'
+store_option = "Windows"
+ok_button = "OK"

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+runtime/
+config.toml
+cadastro.json
+*.pfx
+*.p12
+*.pem
+*.key
+
+*.egg-info/
+*.log

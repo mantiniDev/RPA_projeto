@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pje-advogado-rpa"
+version = "0.1.0"
+description = "RPA auditavel para primeiro cadastro de advogado no PJe"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.50,<2"]
+signer = ["java-access-bridge-wrapper>=2,<3"]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+pje-rpa = "pje_rpa.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

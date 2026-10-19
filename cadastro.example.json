@@ -1,0 +1,18 @@
+{
+  "nome_esperado": "ADVOGADO DE TESTE",
+  "cpf_esperado": "52998224725",
+  "oab_numero": "12345",
+  "oab_uf": "BA",
+  "email": "advogado@example.com",
+  "telefone": "71999999999",
+  "autorizacao_ref": "TERMO-AUTORIZACAO-EXEMPLO",
+  "endereco": {
+    "cep": "40000000",
+    "logradouro": "ENDERECO DE TESTE",
+    "numero": "100",
+    "complemento": "",
+    "bairro": "BAIRRO DE TESTE",
+    "cidade": "SALVADOR",
+    "uf": "BA"
+  }
+}
