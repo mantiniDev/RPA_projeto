@@ -32,7 +32,7 @@ class SignerError(RuntimeError):
 @dataclass(frozen=True)
 class SignerConfig:
     window_title_regex: str = r"(?i)sele\w+o de certificado"
-    appear_timeout_s: int = 45
+    appear_timeout_s: int = 90
     max_dialogs: int = 4
     jab_dll: str = DEFAULT_JAB_DLL
     # Aba da janela que lista o repositorio do Windows, onde o A1 e instalado temporariamente.

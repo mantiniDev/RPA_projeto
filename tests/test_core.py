@@ -178,6 +178,48 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, RunStatus.COMPLETED)
             self.assertIn("sso_login_opened", audit.path.read_text(encoding="utf-8"))
 
+    def test_waits_for_slow_certificate_login(self) -> None:
+        # O PJeOffice leva ~20 s para enviar a assinatura depois do OK; o fluxo nao pode desistir antes.
+        import time as _time
+
+        class SlowLogin(SimulatedBrowser):
+            def human_completed_certificate(self):
+                self._done_at = _time.monotonic() + 1.5
+                self._target = "registration"
+
+            def visible(self, group, timeout_ms=None):
+                if getattr(self, "_done_at", None) and _time.monotonic() >= self._done_at:
+                    self.stage, self._done_at = self._target, None
+                if self.stage == "post_auth" and getattr(self, "_done_at", None):
+                    return group == "login_certificate_button"
+                return super().visible(group, timeout_ms)
+
+        with tempfile.TemporaryDirectory() as temp:
+            audit = AuditLog(Path(temp))
+            result = _flow(self.config, self.record, SlowLogin(self.record, "success"), audit).run()
+            self.assertEqual(result.status, RunStatus.COMPLETED)
+            self.assertIn("login_page_left", audit.path.read_text(encoding="utf-8"))
+
+    def test_login_that_never_leaves_login_page_fails_clearly(self) -> None:
+        import pje_rpa.flow as flow_module
+
+        class StuckLogin(SimulatedBrowser):
+            def visible(self, group, timeout_ms=None):
+                return group == "login_certificate_button"
+
+            def click(self, group):
+                pass
+
+        original = flow_module.LOGIN_TIMEOUT_MS
+        flow_module.LOGIN_TIMEOUT_MS = 1200
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                result = _flow(self.config, self.record, StuckLogin(self.record, "success"), AuditLog(Path(temp))).run()
+        finally:
+            flow_module.LOGIN_TIMEOUT_MS = original
+        self.assertEqual(result.status, RunStatus.FAILED)
+        self.assertIn("tela de login", result.reason)
+
 
 class ChooseRowTests(unittest.TestCase):
     def _cert(self, issuer="AC Certisign RFB G5", expiry=datetime(2030, 6, 1, 15, 0, 0, tzinfo=timezone.utc)):

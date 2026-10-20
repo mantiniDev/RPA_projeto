@@ -37,9 +37,9 @@ commitment_term = ["text=Termo de compromisso", "text=informacoes sobre o uso do
 sign_term = ["role=button|name=Assinar termo de compromisso", "text=Assinar termo de compromisso"]
 completion = ["text=cadastro foi concluido", "text=cadastro concluido"]
 lawyer_panel = ["text=Painel do advogado", "text=Painel do usuario"]
-second_factor = ["text=codigo de autenticacao", "text=segundo fator"]
-second_factor_input = ["label=Codigo", "css=input[name*='otp']", "css=input[name*='codigo']"]
-second_factor_submit = ["role=button|name=Validar", "role=button|name=Confirmar", "role=button|name=Entrar"]
+second_factor = ["css=input#otp", "css=input[name='otp']", "css=input[autocomplete='one-time-code']", "text=dois fatores", "text=segundo fator", "text=código de verificação", "text=codigo de verificacao", "text=código de autenticação", "text=codigo de autenticacao"]
+second_factor_input = ["css=input#otp", "css=input[name='otp']", "css=input[autocomplete='one-time-code']", "label=Código", "label=Codigo", "css=input[name*='codigo']", "css=input[name*='code']"]
+second_factor_submit = ["css=#kc-login", "role=button|name=Validar", "role=button|name=Confirmar", "role=button|name=Enviar", "role=button|name=Entrar"]
 
 [stop_markers]
 captcha = ["captcha", "nao sou um robo", "recaptcha"]
@@ -54,7 +54,7 @@ jus_postulandi = ["jus postulandi", "juspostulandi"]
 # Para inspecionar a janela aberta: python -m pje_rpa inspect-signer
 [signer]
 window_title_regex = '(?i)sele\w+o de certificado'
-appear_timeout_s = 45
+appear_timeout_s = 90   # o PJeOffice leva ~25 s lendo os certificados do Windows
 max_dialogs = 4
 jab_dll = 'C:\Program Files\PJeOffice Pro\jre\bin\WindowsAccessBridge-64.dll'
 store_option = "Windows"

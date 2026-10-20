@@ -10,6 +10,9 @@ from .certificate import CertificateInfo
 from .models import AppConfig, FlowState, LawyerRecord, RunResult, RunStatus, digits
 from .signer import SignerError, SignerPort
 
+# Tempo maximo para o PDPJ sair da tela de login (ou do 2FA) depois da acao do usuario/PJeOffice.
+LOGIN_TIMEOUT_MS = 90_000
+
 # Recebe a mensagem a exibir e devolve o codigo do segundo fator (ou None se expirar).
 CodeProvider = Callable[[str], "str | None"]
 
@@ -79,10 +82,18 @@ class PJeRegistrationFlow:
         self.signer.authenticate(self.certificate, self._password)
         self.audit.record("signer_authenticated", self.state.value)
 
+        # Depois do OK, o PJeOffice ainda assina e envia o desafio ao PDPJ (medido: ~20 s).
+        # Fechar o navegador antes disso aborta o login, entao espera a tela de login sumir.
+        if not self.browser.wait_hidden("login_certificate_button", LOGIN_TIMEOUT_MS):
+            if blocked := self._blocked_reason():
+                return self._blocked(blocked)
+            return self._failed("Login por certificado nao concluiu: o PJe continuou na tela de login")
+        self.audit.record("login_page_left", self.state.value)
+
         if blocked := self._blocked_reason():
             return self._blocked(blocked)
 
-        if self.browser.visible("second_factor", 3000):
+        if self.browser.visible("second_factor", 8000):
             self._transition(FlowState.SECOND_FACTOR, "second_factor_detected")
             code = self.code_provider(
                 "O PJe pediu o codigo de segundo fator, enviado ao e-mail/celular do advogado."
@@ -93,6 +104,9 @@ class PJeRegistrationFlow:
             self.browser.click("second_factor_submit")
             if isinstance(self.browser, SimulatedBrowser):
                 self.browser.human_completed_second_factor()
+            if not self.browser.wait_hidden("second_factor_input", LOGIN_TIMEOUT_MS):
+                return self._needs_human("Codigo de segundo fator recusado ou expirado")
+            self.audit.record("second_factor_accepted", self.state.value)
             if blocked := self._blocked_reason():
                 return self._blocked(blocked)
 

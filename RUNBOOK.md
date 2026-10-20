@@ -79,8 +79,11 @@ dominio `.jus.br`. Faz o login com o A1, confere nome/CPF/OAB, preenche o formul
 **para antes de "Confirmar dados"**: nada e enviado nem assinado.
 
 ```powershell
-.\scripts\ensaiar.ps1
+.\scripts\ensaiar.ps1 -Tribunal tjpa
 ```
+
+Cada tribunal tem seu arquivo em `tribunais\` (hoje: `tjap.toml`, `tjpa.toml`, `trt2.toml`). Para um novo
+tribunal, copie um deles, troque `tribunal`/`base_url` e mapeie o botao do certificado.
 
 Resultado esperado: `REHEARSAL_OK`. Se der `FAILED`, o evento `flow_failed` do `audit.jsonl`
 traz em `page` os titulos, rotulos, botoes e nomes de campos da tela em que parou (nome do

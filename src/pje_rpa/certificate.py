@@ -127,6 +127,36 @@ def _der_string_payload(raw: bytes) -> str:
 # --------------------------------------------------------------------------- Windows
 
 
+def _rewrap_for_legacy_csp(data: bytes, password: str) -> tuple[bytes, str]:
+    """Reempacota o .pfx, em memoria, sem o atributo que escolhe o provedor de chaves.
+
+    Muitos .pfx de AC trazem o atributo "Microsoft CSP Name" apontando para o armazenamento
+    CNG ("Key Storage Provider"). Com a chave no CNG, o PJeOffice (aba "Windows") falha ao
+    assinar o desafio de login do PDPJ, que usa MD5WITHRSA: "Unrecognised hash algorithm".
+    Sem o atributo, o Windows importa no provedor CryptoAPI classico, que assina MD5.
+    O novo pacote usa uma senha aleatoria descartavel e cifra 3DES/SHA1, aceita por qualquer Windows.
+    """
+    import secrets
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.serialization import PrivateFormat
+
+    try:
+        key, cert, chain = pkcs12.load_key_and_certificates(data, password.encode("utf-8"))
+    except ValueError as exc:
+        raise CertificateError("Senha incorreta ou arquivo nao e um certificado A1 (.pfx/.p12)") from exc
+    temp_password = secrets.token_urlsafe(24)
+    encryption = (
+        PrivateFormat.PKCS12.encryption_builder()
+        .kdf_rounds(50000)
+        .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
+        .hmac_hash(hashes.SHA1())
+        .build(temp_password.encode("ascii"))
+    )
+    rewrapped = pkcs12.serialize_key_and_certificates(None, key, cert, chain or None, encryption)
+    return rewrapped, temp_password
+
+
 _IMPORT_PS = r"""
 $ErrorActionPreference = 'Stop'
 $b64 = [Console]::In.ReadLine()
@@ -139,6 +169,8 @@ $store.Open('ReadWrite')
 $store.Add($cert)
 $store.Close()
 Write-Output $cert.Thumbprint
+# Chaves CNG nao expoem CspKeyContainerInfo no .NET Framework (PrivateKey nulo ou excecao).
+try { Write-Output ("PROVIDER=" + $cert.PrivateKey.CspKeyContainerInfo.ProviderName) } catch { Write-Output "PROVIDER=CNG" }
 """
 
 _REMOVE_PS = r"""
@@ -163,15 +195,28 @@ class WindowsCertificateStore:
         self.powershell = powershell
 
     def install(self, data: bytes, password: str) -> str:
-        payload = base64.b64encode(data).decode("ascii") + "\n" + password + "\n"
-        output = self._run(_IMPORT_PS, payload)
-        thumbprint = output.strip().splitlines()[-1].strip().upper()
+        legacy_data, legacy_password = _rewrap_for_legacy_csp(data, password)
+        payload = base64.b64encode(legacy_data).decode("ascii") + "\n" + legacy_password + "\n"
+        lines = [line.strip() for line in self._run(_IMPORT_PS, payload).strip().splitlines() if line.strip()]
+        thumbprint = next((line.upper() for line in lines if len(line) == 40 and "=" not in line), "")
+        provider = next((line.split("=", 1)[1] for line in lines if line.startswith("PROVIDER=")), "")
         if len(thumbprint) != 40:
             raise CertificateError("Importacao do certificado nao retornou thumbprint valido")
+        # Chave CNG aparece sem provedor (PrivateKey nulo no .NET Framework) ou como "Key Storage".
+        if not provider or provider == "CNG" or "key storage" in provider.lower():
+            self.remove(thumbprint)
+            raise CertificateError(
+                "O Windows guardou a chave no armazenamento CNG, que o PJeOffice nao consegue usar "
+                "para o login (MD5WITHRSA). Certificado removido; nada foi enviado."
+            )
         return thumbprint
 
     def remove(self, thumbprint: str) -> None:
         self._run(_REMOVE_PS, thumbprint + "\n")
+
+    def contains(self, thumbprint: str) -> bool:
+        out = self._run("$t = [Console]::In.ReadLine().Trim(); Test-Path \"Cert:\\CurrentUser\\My\\$t\"", thumbprint + "\n")
+        return out.strip().lower().endswith("true")
 
     def _run(self, script: str, stdin: str) -> str:
         completed = subprocess.run(

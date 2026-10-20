@@ -143,12 +143,46 @@ class RegistrationServer:
         self._httpd = ThreadingHTTPServer((host, port), Handler)
 
     def serve_forever(self) -> None:
+        self._cleanup_pending("execucao anterior interrompida")
         mode = "ENSAIO (para antes de enviar)" if self.rehearsal else "REAL"
         print(f"Pagina local de cadastro em http://{self.host}:{self.port}/  modo {mode}  (Ctrl+C encerra)")
         try:
             self._httpd.serve_forever()
         except KeyboardInterrupt:
-            self._httpd.shutdown()
+            self._httpd.server_close()
+            self._cleanup_pending("encerramento com Ctrl+C")
+
+    # ------------------------------------------------------- certificados pendentes
+    # O thumbprint (publico, sem segredo) e anotado ANTES da instalacao e apagado depois da
+    # remocao. Se o processo morrer no meio (Ctrl+C, janela fechada, queda), a proxima
+    # abertura da pagina remove o que ficou no repositorio do Windows.
+    @property
+    def _pending_path(self) -> Path:
+        return self.audit_root.parent / "certificados-pendentes.txt"
+
+    def _pending(self) -> list[str]:
+        try:
+            return [t for t in self._pending_path.read_text(encoding="ascii").split() if len(t) == 40]
+        except FileNotFoundError:
+            return []
+
+    def _set_pending(self, thumbprints: list[str]) -> None:
+        if thumbprints:
+            self._pending_path.parent.mkdir(parents=True, exist_ok=True)
+            self._pending_path.write_text("\n".join(sorted(set(thumbprints))) + "\n", encoding="ascii")
+        else:
+            self._pending_path.unlink(missing_ok=True)
+
+    def _cleanup_pending(self, why: str) -> None:
+        remaining = []
+        for thumbprint in self._pending():
+            try:
+                WindowsCertificateStore().remove(thumbprint)
+                print(f"Certificado {thumbprint[:8]}... removido do repositorio do Windows ({why})")
+            except Exception:  # noqa: BLE001
+                remaining.append(thumbprint)
+                print(f"ATENCAO: nao foi possivel remover o certificado {thumbprint[:8]}...; remova pelo certmgr.msc")
+        self._set_pending(remaining)
 
     # ------------------------------------------------------------------ execucao
     def _execute(self, pfx: bytes, password: str, record: LawyerRecord) -> None:
@@ -167,8 +201,17 @@ class RegistrationServer:
             else:
                 assert_live_ready(self.config, record)
 
-            session.emit("step", text=f"Instalando o certificado de {info.safe_summary()['titular']} no repositorio")
-            thumbprint = store.install(pfx, password)
+            if store.contains(info.thumbprint_sha1):
+                # Ja estava instalado antes do robo: usa e NAO remove ao final (nao e nosso).
+                session.emit("step", text="Certificado ja estava no repositorio do Windows; sera mantido")
+            else:
+                session.emit("step", text=f"Instalando o certificado de {info.safe_summary()['titular']} no repositorio")
+                self._set_pending(self._pending() + [info.thumbprint_sha1])
+                thumbprint = info.thumbprint_sha1
+                installed = store.install(pfx, password)
+                if installed != thumbprint:
+                    self._set_pending(self._pending() + [installed])
+                    thumbprint = installed
 
             audit = AuditLog(self.audit_root)
             audit.on_record = lambda event, state: session.emit("log", event=event, state=state)
@@ -201,6 +244,7 @@ class RegistrationServer:
             if thumbprint:
                 try:
                     store.remove(thumbprint)
+                    self._set_pending([t for t in self._pending() if t != thumbprint])
                     session.emit("step", text="Certificado removido do repositorio")
                 except Exception:
                     session.emit("step", text="ATENCAO: remova o certificado manualmente do repositorio do Windows")

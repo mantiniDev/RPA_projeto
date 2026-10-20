@@ -44,6 +44,15 @@ class BrowserPort(ABC):
     @abstractmethod
     def visible(self, group: str, timeout_ms: int | None = None) -> bool: ...
 
+    def wait_hidden(self, group: str, timeout_ms: int) -> bool:
+        """Espera nenhum seletor do grupo estar visivel (ex.: a tela de login sumir)."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while self.visible(group, 1):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
+        return True
+
     @abstractmethod
     def click(self, group: str) -> None: ...
 
