@@ -8,8 +8,10 @@ from pathlib import Path
 
 from .audit import AuditLog, verify_audit_file
 from .browser import SimulatedBrowser
-from .config import ConfigurationError, assert_live_ready, load_config, load_lawyer
+from .config import ConfigurationError, assert_live_ready, lawyer_from_dict, load_config, load_lawyer
 from .flow import PJeRegistrationFlow, console_code_provider
+from .models import LawyerRecord
+from .planilha import read_sheet
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,12 +48,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect = sub.add_parser("inspect-signer", help="Lista os controles das janelas do PJeOffice abertas")
     inspect.add_argument("--config", type=Path, default=Path("config.toml"))
+
+    sheet = sub.add_parser("planilha", help="Confere uma planilha de cadastro (.xlsx/.csv) linha a linha")
+    sheet.add_argument("path", type=Path)
     return parser
 
 
 def _common_files(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=Path("config.toml"))
-    parser.add_argument("--data", type=Path, default=Path("cadastro.json"))
+    parser.add_argument("--data", type=Path, default=Path("cadastro.json"),
+                        help="cadastro.json ou planilha .xlsx/.csv (com --linha)")
+    parser.add_argument("--linha", type=int, help="Linha da planilha (como aparece no Excel)")
+
+
+def _load_record(path: Path, linha: int | None) -> LawyerRecord:
+    if path.suffix.lower() not in {".xlsx", ".csv"}:
+        return load_lawyer(path)
+    rows = read_sheet(path.name, path.read_bytes())
+    if linha is None:
+        if len(rows) != 1:
+            raise ConfigurationError(f"A planilha tem {len(rows)} advogados: informe --linha")
+        linha = rows[0].linha
+    row = next((r for r in rows if r.linha == linha), None)
+    if row is None:
+        raise ConfigurationError(f"Linha {linha} vazia ou inexistente na planilha")
+    return lawyer_from_dict(row.cadastro)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,9 +94,21 @@ def main(argv: list[str] | None = None) -> int:
             from .signer import dump_signer_windows
             print(dump_signer_windows(load_config(args.config).signer))
             return 0
+        if args.command == "planilha":
+            rows = read_sheet(args.path.name, args.path.read_bytes())
+            report = []
+            for row in rows:
+                entry = {"linha": row.linha, "valida": not row.erros}
+                if row.erros:
+                    entry["erros"] = row.erros
+                else:
+                    entry["dados"] = lawyer_from_dict(row.cadastro).safe_summary()
+                report.append(entry)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if all(not row.erros for row in rows) else 2
 
         config = load_config(args.config)
-        record = load_lawyer(args.data)
+        record = _load_record(args.data, args.linha)
         if args.command == "validate":
             print(json.dumps({"valid": True, "tribunal": config.tribunal, "data": record.safe_summary()}, ensure_ascii=False, indent=2))
             return 0

@@ -49,6 +49,8 @@ Estas nao sao contornaveis e sao intencionais:
    allow_live_submission = true
    ```
 6. `scripts\executar-live.ps1` abre a pagina local. Deixe o PJeOffice PRO rodando antes.
+   Os dados do advogado podem ser digitados ou vir de uma planilha `.xlsx`/`.csv` no formato de
+   `cadastro.modelo.csv` (sem a senha, que e sempre digitada). Veja o `RUNBOOK.md`, secao 5.
 
 ## Limites importantes
 

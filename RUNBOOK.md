@@ -98,7 +98,20 @@ Com o PJeOffice PRO aberto e validado:
 ```
 
 Isso abre `http://127.0.0.1:8723/`. Na pagina, solte o `.pfx`, digite a senha, confira os
-dados e clique em iniciar. O robo conduz todo o cadastro. A unica intervencao possivel e
+dados e clique em iniciar.
+
+Os dados podem vir de uma planilha (`.xlsx` ou `.csv`): solte-a na area "Opcional: arraste a
+planilha" e escolha o advogado, se houver mais de um. Os campos sao preenchidos e continuam
+editaveis. O modelo esta em `cadastro.modelo.csv`: uma linha por advogado, com as colunas Nome
+do titular, CPF, OAB numero, OAB UF, E-mail, Telefone, CEP, Logradouro, Numero, Complemento,
+Bairro, Cidade, UF e Referencia da autorizacao. Acentos e maiusculas nos nomes das colunas nao
+importam, e a OAB tambem pode vir numa coluna so (`12345/BA`). A planilha e lida so em memoria.
+**Ela nao pode ter a senha do certificado**: uma coluna de senha faz a planilha ser recusada.
+Para conferir a planilha antes, sem abrir o navegador:
+
+```powershell
+.\.venv\Scripts\python.exe -m pje_rpa planilha .\advogados.xlsx
+``` O robo conduz todo o cadastro. A unica intervencao possivel e
 digitar o codigo de segundo fator, se o PJe pedir. CAPTCHA ou divergencia encerram a
 execucao.
 

@@ -302,3 +302,100 @@ class WebAppOriginTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+def _xlsx(rows):
+    """Monta um .xlsx minimo em memoria: textos inline e numeros como celula numerica."""
+    import io
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    def cell(ref, value):
+        if isinstance(value, (int, float)):
+            return f'<c r="{ref}"><v>{value}</v></c>'
+        return f'<c r="{ref}" t="inlineStr"><is><t>{escape(value)}</t></is></c>'
+
+    body = "".join(
+        f'<row r="{r}">' + "".join(cell(f"{chr(65 + c)}{r}", v) for c, v in enumerate(row)) + "</row>"
+        for r, row in enumerate(rows, start=1))
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    rel = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/workbook.xml", f'<workbook {ns} {rel}><sheets><sheet name="A" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        archive.writestr("xl/_rels/workbook.xml.rels",
+                         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                         '<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        archive.writestr("xl/worksheets/sheet1.xml", f"<worksheet {ns}><sheetData>{body}</sheetData></worksheet>")
+    return buffer.getvalue()
+
+
+_HEADER = ["Nome do titular", "CPF", "OAB numero", "OAB UF", "E-mail", "Telefone", "CEP", "Logradouro",
+           "Número", "Complemento", "Bairro", "Cidade", "UF", "Referência da autorização"]
+
+
+class SheetTests(unittest.TestCase):
+    def test_modelo_csv_matches_example_json(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        rows = read_sheet("cadastro.modelo.csv", (PROJECT / "cadastro.modelo.csv").read_bytes())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].linha, 2)
+        self.assertEqual(rows[0].erros, [])
+        from pje_rpa.config import lawyer_from_dict
+        self.assertEqual(lawyer_from_dict(rows[0].cadastro), load_lawyer(PROJECT / "cadastro.example.json"))
+
+    def test_xlsx_restores_lost_zeros_and_splits_oab(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        header = [h for h in _HEADER if h != "OAB UF"]
+        data = _xlsx([header,
+                      ["MARIA DA SILVA", 1234567890, "98.765/sp", "maria@adv.com.br", 11987654321, 1310100,
+                       "AV PAULISTA", 1000, "", "BELA VISTA", "SAO PAULO", "SP", "titular presente"],
+                      [],
+                      ["JOSE SOUZA", 11111111111, "", "x", 1, 1, "", "", "", "", "", "", ""]])
+        rows = read_sheet("advogados.xlsx", data)
+        self.assertEqual([r.linha for r in rows], [2, 4])
+        ok = rows[0]
+        self.assertEqual(ok.erros, [])
+        self.assertEqual(ok.cadastro["cpf_esperado"], "01234567890")
+        self.assertEqual(ok.cadastro["endereco"]["cep"], "01310100")
+        self.assertEqual((ok.cadastro["oab_numero"], ok.cadastro["oab_uf"]), ("98.765", "SP"))
+        self.assertIn("cpf_esperado invalido", rows[1].erros)
+        self.assertIn("oab_numero obrigatorio", rows[1].erros)
+
+    def test_password_column_is_refused(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        csv_bytes = "Nome;CPF;Senha do certificado\nMARIA DA SILVA;52998224725;segredo\n".encode("utf-8")
+        with self.assertRaisesRegex(ConfigurationError, "senha"):
+            read_sheet("a.csv", csv_bytes)
+
+    def test_csv_cp1252_with_commas(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        text = ",".join(_HEADER) + "\nJOÃO PEREIRA,529.982.247-25,123,BA,j@adv.com,(71) 99999-9999,40000-000,RUA A,1,,CENTRO,SALVADOR,BA,ref\n"
+        rows = read_sheet("a.csv", text.encode("cp1252"))
+        self.assertEqual(rows[0].erros, [])
+        self.assertEqual(rows[0].cadastro["nome_esperado"], "JOÃO PEREIRA")
+
+    def test_cli_loads_record_from_sheet_line(self) -> None:
+        from pje_rpa.cli import _load_record
+
+        record = _load_record(PROJECT / "cadastro.modelo.csv", None)
+        self.assertEqual(record.cpf_esperado, "52998224725")
+        with self.assertRaisesRegex(ConfigurationError, "Linha 5"):
+            _load_record(PROJECT / "cadastro.modelo.csv", 5)
+
+    def test_page_endpoint_answers_rows_and_errors(self) -> None:
+        import base64
+        from pje_rpa.webapp import _sheet_answer
+
+        good = json.dumps({"nome": "cadastro.modelo.csv",
+                           "base64": base64.b64encode((PROJECT / "cadastro.modelo.csv").read_bytes()).decode()})
+        status, answer = _sheet_answer(good.encode())
+        self.assertEqual(status, 200)
+        self.assertEqual(answer["linhas"][0]["cadastro"]["oab_uf"], "BA")
+        status, answer = _sheet_answer(json.dumps({"nome": "a.pdf", "base64": ""}).encode())
+        self.assertEqual(status, 400)
+        self.assertIn("xlsx", answer["error"])

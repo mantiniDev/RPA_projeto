@@ -27,7 +27,12 @@ from .config import (
 )
 from .flow import PJeRegistrationFlow
 from .models import LawyerRecord, digits
+from .planilha import read_sheet
 from .signer import PJeOfficeSigner
+
+
+# .pfx ou planilha (ate 5 MB) em base64, mais o JSON em volta.
+_MAX_BODY = 8 * 1024 * 1024
 
 
 class _Session:
@@ -77,12 +82,20 @@ class RegistrationServer:
                     self._send(404, "text/plain", b"nao encontrado")
 
             def do_POST(self):
+                # Le o corpo antes de responder: recusar sem ler faz o Windows abortar a conexao.
+                length = int(self.headers.get("Content-Length", 0))
+                if length > _MAX_BODY:
+                    self.close_connection = True
+                    self._send(413, "text/plain", b"arquivo grande demais")
+                    return
+                body = self.rfile.read(length)
                 if not self._trusted(require_origin=True):
                     return
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
                 if self.path == "/start":
                     self._start(body)
+                elif self.path == "/planilha":
+                    status, answer = _sheet_answer(body)
+                    self._send(status, "application/json", json.dumps(answer, ensure_ascii=False).encode("utf-8"))
                 elif self.path == "/code":
                     try:
                         server.session.code_box.put_nowait((json.loads(body).get("code") or "").strip() or None)
@@ -268,6 +281,18 @@ def _record_from_payload(raw: dict) -> LawyerRecord:
     return lawyer_from_dict(raw)
 
 
+def _sheet_answer(body: bytes) -> "tuple[int, dict]":
+    """Le a planilha enviada pela pagina (so em memoria) e devolve as linhas para preencher."""
+    try:
+        payload = json.loads(body)
+        rows = read_sheet(str(payload["nome"]), _decode_pfx(payload["base64"]))
+    except ConfigurationError as exc:
+        return 400, {"error": str(exc)}
+    except (KeyError, ValueError, TypeError):
+        return 400, {"error": "planilha invalida"}
+    return 200, {"linhas": [asdict(row) for row in rows]}
+
+
 _PAGE = """<!doctype html>
 <html lang="pt-br"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -283,11 +308,14 @@ _PAGE = """<!doctype html>
   p.sub{color:var(--muted);margin:0 0 24px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
   label{display:block;font-weight:550;margin:12px 0 4px}
-  input{width:100%;padding:10px 12px;background:#0d0f14;border:1px solid var(--line);
+  input,select{width:100%;padding:10px 12px;background:#0d0f14;border:1px solid var(--line);
         border-radius:8px;color:var(--ink);font:inherit}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .drop{border:1.5px dashed var(--line);border-radius:10px;padding:22px;text-align:center;color:var(--muted);cursor:pointer}
   .drop.has{border-color:var(--accent);color:var(--ink)}
+  #sheetdrop{padding:14px;margin-bottom:4px}
+  #sheetnote:empty{display:none}
+  .note.err{color:var(--err)}
   button{margin-top:20px;width:100%;padding:12px;border:0;border-radius:9px;background:var(--accent);
          color:#fff;font:inherit;font-weight:600;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
@@ -310,6 +338,10 @@ _PAGE = """<!doctype html>
   <p class="mode" id="mode"></p>
 
   <div class="card" id="form">
+    <div class="drop" id="sheetdrop">Opcional: arraste a planilha com os dados (.xlsx / .csv) para preencher os campos
+      <input type="file" id="sheet" accept=".xlsx,.csv" class="hidden"></div>
+    <div id="sheetpick" class="hidden"><label>Advogado da planilha</label><select id="sheetrow"></select></div>
+    <p class="note" id="sheetnote"></p>
     <div class="drop" id="drop">Arraste o arquivo .pfx / .p12 aqui ou clique para escolher
       <input type="file" id="pfx" accept=".pfx,.p12" class="hidden"></div>
     <label>Senha do certificado</label>
@@ -372,6 +404,36 @@ file.onchange=load;
 function load(){const f=file.files[0];if(!f)return;const r=new FileReader();
   r.onload=()=>{pfxB64=r.result.split(",")[1];drop.textContent=f.name;drop.classList.add("has");check()};
   r.readAsDataURL(f);}
+// Planilha: lida no servidor local so em memoria; aqui so preenche os campos (que continuam editaveis).
+let sheetRows=[];
+const sheetdrop=$("sheetdrop"),sheet=$("sheet");
+sheetdrop.onclick=()=>sheet.click();
+sheetdrop.ondragover=e=>{e.preventDefault();sheetdrop.classList.add("has")};
+sheetdrop.ondragleave=()=>sheetdrop.classList.remove("has");
+sheetdrop.ondrop=e=>{e.preventDefault();sheet.files=e.dataTransfer.files;loadSheet()};
+sheet.onchange=loadSheet;
+function sheetNote(text,err){$("sheetnote").textContent=text;$("sheetnote").className="note"+(err?" err":"");}
+function loadSheet(){const f=sheet.files[0];if(!f)return;const r=new FileReader();
+  r.onload=async()=>{
+    const resp=await fetch("/planilha",{method:"POST",body:JSON.stringify({nome:f.name,base64:r.result.split(",")[1]})});
+    const ans=await resp.json();
+    if(!resp.ok){sheetNote(ans.error,true);$("sheetpick").classList.add("hidden");return;}
+    sheetRows=ans.linhas;sheetdrop.textContent=f.name;sheetdrop.classList.add("has");
+    const sel=$("sheetrow");sel.innerHTML="";
+    sheetRows.forEach((row,i)=>sel.add(new Option(`Linha ${row.linha} - ${row.cadastro.nome_esperado||"(sem nome)"}`
+      +(row.erros.length?" - com erros":""),i)));
+    $("sheetpick").classList.toggle("hidden",sheetRows.length<2);
+    fillFromSheet(0);};
+  r.readAsDataURL(f);}
+$("sheetrow").onchange=e=>fillFromSheet(+e.target.value);
+function fillFromSheet(i){const row=sheetRows[i];if(!row)return;const c=row.cadastro,e=c.endereco||{};
+  const map={nome:c.nome_esperado,cpf:c.cpf_esperado,oab_numero:c.oab_numero,oab_uf:c.oab_uf,email:c.email,
+    telefone:c.telefone,autorizacao_ref:c.autorizacao_ref,cep:e.cep,logradouro:e.logradouro,numero:e.numero,
+    complemento:e.complemento,bairro:e.bairro,cidade:e.cidade,uf:e.uf};
+  Object.entries(map).forEach(([id,v])=>$(id).value=v||"");
+  sheetNote(row.erros.length?`Linha ${row.linha}: corrija antes de iniciar - ${row.erros.join("; ")}`
+    :`Linha ${row.linha} carregada. Confira os campos e digite a senha do certificado.`,row.erros.length>0);
+  check();}
 const req=["password","nome","cpf","oab_numero","oab_uf","email","telefone","cep","numero","logradouro","bairro","cidade","uf","autorizacao_ref"];
 req.forEach(id=>$(id).oninput=check);
 function check(){$("go").disabled=!(pfxB64&&req.every(id=>$(id).value.trim())
