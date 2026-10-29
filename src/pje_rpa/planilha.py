@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
 from .config import ConfigurationError, lawyer_from_dict
+from .totp import parse_totp
 
 MAX_BYTES = 5 * 1024 * 1024
 MAX_PFX_BYTES = 1024 * 1024
@@ -50,10 +51,12 @@ _ALIASES = {
     "certificado": {"certificado", "certificado_a1", "arquivo_do_certificado", "caminho_do_certificado",
                     "link_do_certificado", "link_certificado", "local_do_certificado", "pfx", "arquivo_pfx",
                     "caminho_pfx"},
+    "chave_2fa": {"chave_2fa", "chave_do_2fa", "chave_secreta", "chave_secreta_2fa", "segredo_2fa", "secret_2fa",
+                  "secret_key", "secret", "2fa", "token_2fa", "chave_otp", "otp", "chave_autenticador",
+                  "chave_do_segundo_fator", "segundo_fator", "codigo_2fa"},
 }
 _COLUMN_TO_FIELD = {alias: name for name, aliases in _ALIASES.items() for alias in aliases}
 _ADDRESS_FIELDS = {"cep", "logradouro", "numero", "complemento", "bairro", "cidade", "uf"}
-_CERT_FIELDS = {"senha", "certificado"}
 
 
 @dataclass
@@ -63,11 +66,13 @@ class SheetRow:
     erros: list[str] = field(default_factory=list)
     certificado: str = ""  # caminho do .pfx ja resolvido, quando a planilha informa
     senha: str = field(default="", repr=False)
+    chave_2fa: str = field(default="", repr=False)  # chave do autenticador, nunca o codigo
 
     def for_page(self) -> dict:
-        """O que pode ir para a pagina: tudo menos a senha."""
+        """O que pode ir para a pagina: tudo menos a senha e a chave do 2FA."""
         return {"linha": self.linha, "cadastro": self.cadastro, "erros": self.erros,
-                "certificado": self.certificado, "tem_senha": bool(self.senha)}
+                "certificado": self.certificado, "tem_senha": bool(self.senha),
+                "tem_2fa": bool(self.chave_2fa)}
 
 
 def read_sheet(filename: str, data: bytes, base_dir: Path | None = None) -> list[SheetRow]:
@@ -98,7 +103,7 @@ def read_sheet(filename: str, data: bytes, base_dir: Path | None = None) -> list
         if not any(str(v).strip() for v in values):
             continue
         raw: dict = {"endereco": {}}
-        extra = {"senha": "", "certificado": ""}
+        extra = {"senha": "", "certificado": "", "chave_2fa": ""}
         for column, (col, value) in enumerate(zip(fields, values)):
             if col is None:
                 continue
@@ -107,16 +112,23 @@ def read_sheet(filename: str, data: bytes, base_dir: Path | None = None) -> list
                 extra[col] = links.get((index, column), str(value)).strip()
             elif col == "senha":
                 extra[col] = str(value)  # sem strip: espaco pode fazer parte da senha
+            elif col == "chave_2fa":
+                extra[col] = str(value).strip()
             else:
                 target = raw["endereco"] if col in _ADDRESS_FIELDS else raw
                 target[col] = str(value).strip()
         _fix_lost_zeros(raw)
         _split_oab(raw)
-        row = SheetRow(linha=index, cadastro=raw, senha=extra["senha"])
+        row = SheetRow(linha=index, cadastro=raw, senha=extra["senha"], chave_2fa=extra["chave_2fa"])
         try:
             lawyer_from_dict(raw)
         except ConfigurationError as exc:
             row.erros = str(exc).split("; ")
+        if row.chave_2fa:
+            try:
+                parse_totp(row.chave_2fa)
+            except ConfigurationError as exc:
+                row.erros.append(str(exc))
         if extra["certificado"]:
             try:
                 row.certificado = str(resolve_certificate(extra["certificado"], base_dir))

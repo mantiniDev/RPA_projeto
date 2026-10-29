@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8723)
     serve.add_argument("--ensaio", action="store_true",
                        help="Entra no PJe real e confere os dados, mas para antes de enviar/assinar")
+    serve.add_argument("--planilha", type=Path,
+                       help="Planilha .xlsx/.csv lida direto do disco (a pagina ja abre com ela)")
 
     inspect = sub.add_parser("inspect-signer", help="Lista os controles das janelas do PJeOffice abertas")
     inspect.add_argument("--config", type=Path, default=Path("config.toml"))
@@ -87,8 +89,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.host not in {"127.0.0.1", "localhost", "::1"}:
                 raise ConfigurationError("A pagina local so pode escutar em 127.0.0.1")
             from .webapp import RegistrationServer
+            if args.planilha and not args.planilha.is_file():
+                raise ConfigurationError(f"Planilha nao encontrada: {args.planilha}")
             RegistrationServer(args.config, args.audit_root, args.host, args.port,
-                               rehearsal=args.ensaio).serve_forever()
+                               rehearsal=args.ensaio, sheet_path=args.planilha).serve_forever()
             return 0
         if args.command == "inspect-signer":
             from .signer import dump_signer_windows
@@ -100,7 +104,8 @@ def main(argv: list[str] | None = None) -> int:
             for row in rows:
                 entry = {"linha": row.linha, "valida": not row.erros,
                          "certificado": Path(row.certificado).name if row.certificado else "nao informado",
-                         "senha": "presente" if row.senha else "nao informada"}
+                         "senha": "presente" if row.senha else "nao informada",
+                         "chave_2fa": "presente" if row.chave_2fa else "nao informada"}
                 if row.erros:
                     entry["erros"] = row.erros
                 else:

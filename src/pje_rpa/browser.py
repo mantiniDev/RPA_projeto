@@ -19,6 +19,9 @@ _OUTLINE_JS = """() => {
     headings: pick('h1,h2,h3,h4,legend,.titulo,.title'),
     labels: pick('label'),
     buttons: pick('button,input[type=submit],input[type=button],a[role=button],[role=button]'),
+    // textos soltos (ex.: "Nome: FULANO" exibido sem campo); o fluxo mascara nome e numeros
+    texts: [...document.querySelectorAll('td,th,span,dt,dd,p,div,strong,b')]
+      .filter(el => seen(el) && !el.children.length).map(text).filter(t => t && t.length < 80).slice(0, 80),
     inputs: [...document.querySelectorAll('input,select,textarea')].filter(seen).slice(0, 40)
       .map(el => ({tag: el.tagName.toLowerCase(), type: el.type || '', name: el.name || '', id: el.id || ''})),
   };
@@ -67,6 +70,13 @@ class BrowserPort(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
+
+    def page_text(self) -> str:
+        """Texto visivel da tela (usado para conferir nome/CPF exibidos sem campo)."""
+        return ""
+
+    def commit(self, group: str) -> None:
+        """Sai do campo (Tab) e espera o PJe reagir, ex.: busca de endereco pelo CEP."""
 
     def outline(self) -> dict[str, Any]:
         """Estrutura visivel da tela atual, sem valores de campos (para homologacao)."""
@@ -137,6 +147,20 @@ class PlaywrightBrowser(BrowserPort):
         except Exception:
             return None
         return next((marker for marker in markers if marker.casefold() in body), None)
+
+    def page_text(self) -> str:
+        try:
+            return self.page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            return ""
+
+    def commit(self, group: str) -> None:
+        self._first_visible(group).press("Tab")
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        self.page.wait_for_timeout(1500)  # o AJAX do JSF (a4j) nem sempre aparece como rede pendente
 
     def close(self) -> None:
         self._context.close()
@@ -275,6 +299,10 @@ class SimulatedBrowser(BrowserPort):
             "detected_oab": f"{self.record.oab_numero}/{self.record.oab_uf}",
         }
         return values.get(group, self.values.get(group, ""))
+
+    def page_text(self) -> str:
+        cpf = self.record.cpf_esperado
+        return f"Nome: {self.record.nome_esperado}\nCPF: {cpf[:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:]}"
 
     def page_text_contains(self, markers: list[str]) -> str | None:
         if self.scenario == "captcha" and self.stage == "post_auth":

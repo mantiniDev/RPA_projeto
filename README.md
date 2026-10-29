@@ -50,8 +50,9 @@ Estas nao sao contornaveis e sao intencionais:
    ```
 6. `scripts\executar-live.ps1` abre a pagina local. Deixe o PJeOffice PRO rodando antes.
    Os dados do advogado podem ser digitados ou vir de uma planilha `.xlsx`/`.csv` no formato de
-   `cadastro.modelo.csv`, que tambem pode trazer o caminho do `.pfx` e a senha. Veja o
-   `RUNBOOK.md`, secao 5, e o `SECURITY.md`.
+   `cadastro.modelo.csv`, que tambem pode trazer o caminho do `.pfx`, a senha e a chave do
+   autenticador 2FA (o robo gera o codigo sozinho). A planilha e lida direto do disco
+   (`-Planilha`). Veja o `RUNBOOK.md`, secao 5, e o `SECURITY.md`.
 
 ## Limites importantes
 

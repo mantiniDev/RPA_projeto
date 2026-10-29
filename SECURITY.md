@@ -9,19 +9,22 @@
 - O `.pfx` **nao e gravado em disco** pelo robo. O certificado e importado no repositorio
   `CurrentUser\My` como chave **nao exportavel** e **removido ao final**, com a chave
   privada.
-- Quando os dados vem de planilha, ela pode trazer a senha e o caminho do `.pfx`. O robo
-  le a planilha so em memoria, le o `.pfx` direto do caminho informado e **nunca devolve a
-  senha para a pagina** nem a grava em log. A planilha em si, porem, e um arquivo com a
-  senha em texto: guarde-a numa pasta com acesso restrito ao operador (fora do OneDrive
-  compartilhado e fora desta pasta do projeto) e apague-a, ou apague a coluna de senha,
-  assim que os cadastros terminarem.
+- Quando os dados vem de planilha, ela pode trazer a senha, o caminho do `.pfx` e a chave
+  do 2FA. O robo le a planilha so em memoria, le o `.pfx` direto do caminho informado e
+  **nunca devolve a senha nem a chave do 2FA para a pagina**, nem as grava em log (o codigo
+  gerado tambem nao vai para o log). A planilha em si, porem, e um arquivo com o certificado
+  apontado, a senha e a chave do 2FA em texto: quem tem a planilha e o `.pfx` tem os dois
+  fatores do advogado. Guarde-a numa pasta com acesso restrito ao operador (fora do OneDrive
+  compartilhado e fora desta pasta do projeto) e apague-a, ou apague as colunas de senha e
+  chave, assim que os cadastros terminarem.
 - A assinatura e feita pelo **PJeOffice PRO oficial**. O robo nao implementa nem imita o
   assinador; apenas opera as janelas oficiais.
 
 ## O que este projeto deliberadamente nao faz
 
 - Nao automatiza CAPTCHA.
-- Nao busca o codigo de segundo fator sozinho — ele e informado na pagina.
+- Nao le e-mail nem SMS do advogado. O codigo de segundo fator vem da chave do app
+  autenticador informada na planilha (o mesmo calculo do app) ou e digitado na pagina.
 - Nao prossegue quando nome ou CPF divergem entre certificado, dados e PJe.
 - Nao tenta cadastrar pessoa diferente do titular do certificado.
 - Nao usa endpoints internos nem engenharia reversa do PJe.

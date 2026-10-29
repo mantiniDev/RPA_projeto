@@ -150,7 +150,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, RunStatus.FAILED)
             log = audit.path.read_text(encoding="utf-8")
             self.assertIn("primeirograu/Painel", log)
-            self.assertIn("BEM-VINDO", log)
+            self.assertIn("Bem-vindo", log)  # caixa preservada: ids/names viram seletores
             page = log.split('"page"')[1]
             self.assertNotIn("ADVOGADO", page)
             self.assertNotIn("529", page)
@@ -445,13 +445,108 @@ class SheetTests(unittest.TestCase):
         self.assertNotIn("segredo-da-planilha", json.dumps(answer))
         self.assertEqual((answer["linhas"][0]["certificado"], answer["linhas"][0]["tem_senha"]), (str(pfx), True))
 
-        self.assertEqual(server.credentials({"planilha_linha": 2}), (b"conteudo-pfx", "segredo-da-planilha"))
+        self.assertEqual(server.credentials({"planilha_linha": 2}), (b"conteudo-pfx", "segredo-da-planilha", None))
         # o que for digitado/arrastado na pagina substitui a planilha
         manual = {"planilha_linha": 2, "password": "outra", "pfx_base64": base64.b64encode(b"outro").decode()}
-        self.assertEqual(server.credentials(manual), (b"outro", "outra"))
+        self.assertEqual(server.credentials(manual), (b"outro", "outra", None))
         with self.assertRaisesRegex(ValueError, "senha"):
             server.credentials({"pfx_base64": base64.b64encode(b"outro").decode()})
 
         status, answer = server.load_sheet(json.dumps({"nome": "a.pdf", "base64": ""}).encode())
         self.assertEqual(status, 400)
         self.assertIn("xlsx", answer["error"])
+
+
+_RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # "12345678901234567890" (RFC 6238, anexo B)
+
+
+class SecondFactorAndFormTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_config(PROJECT / "config.example.toml")
+        self.record = load_lawyer(PROJECT / "cadastro.example.json")
+
+    def test_totp_matches_rfc6238_vectors(self) -> None:
+        from pje_rpa.totp import parse_totp
+
+        key = parse_totp(_RFC_SECRET.lower()[:16] + " " + _RFC_SECRET.lower()[16:])
+        self.assertEqual(key.code(59), "287082")
+        self.assertEqual(key.code(1111111109), "081804")
+        uri = parse_totp(f"otpauth://totp/PDPJ:fulano?secret={_RFC_SECRET}&digits=8&issuer=PDPJ")
+        self.assertEqual(uri.code(59), "94287082")
+        self.assertNotIn(_RFC_SECRET, repr(key))
+        with self.assertRaisesRegex(ConfigurationError, "expira"):
+            parse_totp("123456")
+        with self.assertRaisesRegex(ConfigurationError, "base32"):
+            parse_totp("nao-e-base32!")
+
+    def test_sheet_reads_2fa_key_and_never_sends_it_to_page(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        text = f"Nome;CPF;Chave 2FA\nMARIA DA SILVA;52998224725;{_RFC_SECRET}\nMARIA DA SILVA;52998224725;654321\n"
+        rows = read_sheet("a.csv", text.encode())
+        self.assertEqual(rows[0].chave_2fa, _RFC_SECRET)
+        self.assertNotIn(_RFC_SECRET, json.dumps(rows[0].for_page()))
+        self.assertTrue(rows[0].for_page()["tem_2fa"])
+        self.assertIn("expira", rows[1].erros[-1])
+
+    def test_flow_generates_2fa_code_without_asking_operator(self) -> None:
+        from pje_rpa.totp import parse_totp
+
+        asked = []
+        with tempfile.TemporaryDirectory() as temp:
+            browser = SimulatedBrowser(self.record, "second_factor")
+            flow = PJeRegistrationFlow(self.config, self.record, _info(self.record), "senha", browser,
+                                       SimulatedSigner(browser), AuditLog(Path(temp)),
+                                       code_provider=lambda m: asked.append(m) or "000000",
+                                       rehearsal=True, totp=parse_totp(_RFC_SECRET))
+            result = flow.run()
+            self.assertEqual(result.status, RunStatus.REHEARSAL_OK)
+            self.assertEqual(asked, [])
+            self.assertRegex(browser.values["second_factor_input"], r"^\d{6}$")
+            log = flow.audit.path.read_text(encoding="utf-8")
+            self.assertIn("chave da planilha", log)
+            self.assertNotIn(browser.values["second_factor_input"], log)
+
+    def test_identity_from_page_text_and_split_phone(self) -> None:
+        class TextOnlyBrowser(SimulatedBrowser):
+            """Como o TJAP: nome/CPF so como texto e telefone em DDD + numero."""
+
+            def visible(self, group, timeout_ms=None):
+                if group.startswith("detected_"):
+                    return False
+                if group == "phone_ddd":
+                    return self.stage == "registration"
+                return super().visible(group, timeout_ms)
+
+        config = replace(self.config, selectors={**self.config.selectors, "phone_ddd": ["css=#ddd"]})
+        with tempfile.TemporaryDirectory() as temp:
+            browser = TextOnlyBrowser(self.record, "success")
+            result = _flow(config, self.record, browser, AuditLog(Path(temp)), rehearsal=True).run()
+            self.assertEqual(result.status, RunStatus.REHEARSAL_OK)
+            self.assertEqual(browser.values["phone_ddd"], self.record.telefone[:2])
+            self.assertEqual(browser.values["phone"], self.record.telefone[2:])
+            self.assertEqual(browser.values["cep"], self.record.endereco.cep)
+
+            other = replace(self.record, cpf_esperado="11144477735")
+            browser = TextOnlyBrowser(self.record, "success")
+            flow = PJeRegistrationFlow(config, other, _info(other), "senha", browser, SimulatedSigner(browser),
+                                       AuditLog(Path(temp)), code_provider=lambda m: None, rehearsal=True)
+            self.assertEqual(flow.run().status, RunStatus.BLOCKED)
+
+    def test_fixed_sheet_is_reread_from_disk(self) -> None:
+        from pje_rpa.webapp import RegistrationServer
+
+        folder = Path(tempfile.mkdtemp())
+        (folder / "a1.pfx").write_bytes(b"pfx")
+        sheet = folder / "advogados.csv"
+        sheet.write_text(f"Nome;CPF;Certificado;Senha;Chave 2FA\nMARIA DA SILVA;52998224725;a1.pfx;velha;{_RFC_SECRET}\n",
+                         encoding="utf-8")
+        server = RegistrationServer(PROJECT / "config.example.toml", Path(tempfile.mkdtemp()), port=0,
+                                    sheet_path=sheet)
+        self.addCleanup(server._httpd.server_close)
+        status, answer = server.load_sheet_from_disk()
+        self.assertEqual(status, 200)
+        self.assertEqual(answer["linhas"][0]["certificado"], str((folder / "a1.pfx").resolve()))  # relativo a planilha
+        sheet.write_text(sheet.read_text(encoding="utf-8").replace("velha", "nova"), encoding="utf-8")
+        pfx, password, totp = server.credentials({"planilha_linha": 2})
+        self.assertEqual((pfx, password, totp.code(59)), (b"pfx", "nova", "287082"))
