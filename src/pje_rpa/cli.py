@@ -64,7 +64,7 @@ def _common_files(parser: argparse.ArgumentParser) -> None:
 def _load_record(path: Path, linha: int | None) -> LawyerRecord:
     if path.suffix.lower() not in {".xlsx", ".csv"}:
         return load_lawyer(path)
-    rows = read_sheet(path.name, path.read_bytes())
+    rows = read_sheet(path.name, path.read_bytes(), path.resolve().parent)
     if linha is None:
         if len(rows) != 1:
             raise ConfigurationError(f"A planilha tem {len(rows)} advogados: informe --linha")
@@ -95,10 +95,12 @@ def main(argv: list[str] | None = None) -> int:
             print(dump_signer_windows(load_config(args.config).signer))
             return 0
         if args.command == "planilha":
-            rows = read_sheet(args.path.name, args.path.read_bytes())
+            rows = read_sheet(args.path.name, args.path.read_bytes(), args.path.resolve().parent)
             report = []
             for row in rows:
-                entry = {"linha": row.linha, "valida": not row.erros}
+                entry = {"linha": row.linha, "valida": not row.erros,
+                         "certificado": Path(row.certificado).name if row.certificado else "nao informado",
+                         "senha": "presente" if row.senha else "nao informada"}
                 if row.erros:
                     entry["erros"] = row.erros
                 else:

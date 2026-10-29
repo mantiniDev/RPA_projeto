@@ -104,10 +104,22 @@ Os dados podem vir de uma planilha (`.xlsx` ou `.csv`): solte-a na area "Opciona
 planilha" e escolha o advogado, se houver mais de um. Os campos sao preenchidos e continuam
 editaveis. O modelo esta em `cadastro.modelo.csv`: uma linha por advogado, com as colunas Nome
 do titular, CPF, OAB numero, OAB UF, E-mail, Telefone, CEP, Logradouro, Numero, Complemento,
-Bairro, Cidade, UF e Referencia da autorizacao. Acentos e maiusculas nos nomes das colunas nao
-importam, e a OAB tambem pode vir numa coluna so (`12345/BA`). A planilha e lida so em memoria.
-**Ela nao pode ter a senha do certificado**: uma coluna de senha faz a planilha ser recusada.
-Para conferir a planilha antes, sem abrir o navegador:
+Bairro, Cidade, UF, Referencia da autorizacao, Certificado e Senha do certificado. Acentos e
+maiusculas nos nomes das colunas nao importam, e a OAB tambem pode vir numa coluna so
+(`12345/BA`).
+
+- **Certificado**: o caminho completo do `.pfx` no computador, como texto
+  (`C:\Users\...\Downloads\certificado.pfx`) ou como hyperlink do Excel para o arquivo. Pela
+  pagina, caminho relativo nao funciona, porque o navegador nao informa onde a planilha esta.
+- **Senha do certificado**: formate a coluna como **Texto** no Excel; senha so com numeros
+  perde o zero da frente se a coluna for numerica.
+- Com certificado e senha na planilha, basta conferir os campos e iniciar. Arrastar outro
+  `.pfx` ou digitar a senha na pagina substitui o que veio da planilha.
+- A senha nunca volta para a pagina nem vai para o log. A planilha guarda a senha em texto:
+  veja `SECURITY.md` sobre onde guarda-la e quando apaga-la.
+
+Para conferir a planilha antes, sem abrir o navegador (mostra se o certificado foi encontrado e
+se a senha esta presente, nunca a senha):
 
 ```powershell
 .\.venv\Scripts\python.exe -m pje_rpa planilha .\advogados.xlsx

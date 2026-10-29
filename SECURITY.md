@@ -9,6 +9,12 @@
 - O `.pfx` **nao e gravado em disco** pelo robo. O certificado e importado no repositorio
   `CurrentUser\My` como chave **nao exportavel** e **removido ao final**, com a chave
   privada.
+- Quando os dados vem de planilha, ela pode trazer a senha e o caminho do `.pfx`. O robo
+  le a planilha so em memoria, le o `.pfx` direto do caminho informado e **nunca devolve a
+  senha para a pagina** nem a grava em log. A planilha em si, porem, e um arquivo com a
+  senha em texto: guarde-a numa pasta com acesso restrito ao operador (fora do OneDrive
+  compartilhado e fora desta pasta do projeto) e apague-a, ou apague a coluna de senha,
+  assim que os cadastros terminarem.
 - A assinatura e feita pelo **PJeOffice PRO oficial**. O robo nao implementa nem imita o
   assinador; apenas opera as janelas oficiais.
 

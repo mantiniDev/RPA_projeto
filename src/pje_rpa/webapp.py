@@ -27,7 +27,7 @@ from .config import (
 )
 from .flow import PJeRegistrationFlow
 from .models import LawyerRecord, digits
-from .planilha import read_sheet
+from .planilha import SheetRow, read_sheet
 from .signer import PJeOfficeSigner
 
 
@@ -62,6 +62,9 @@ class RegistrationServer:
         self.port = port
         self.rehearsal = rehearsal
         self.session = _Session()
+        # Linhas da ultima planilha carregada, por numero de linha. Ficam so em memoria porque
+        # trazem a senha do certificado, que nunca volta para a pagina.
+        self.sheet_rows: dict[int, SheetRow] = {}
         # Hosts/origens aceitos: bloqueia sites abertos no mesmo navegador e DNS rebinding.
         self._allowed_hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]")}
         server = self
@@ -94,7 +97,7 @@ class RegistrationServer:
                 if self.path == "/start":
                     self._start(body)
                 elif self.path == "/planilha":
-                    status, answer = _sheet_answer(body)
+                    status, answer = server.load_sheet(body)
                     self._send(status, "application/json", json.dumps(answer, ensure_ascii=False).encode("utf-8"))
                 elif self.path == "/code":
                     try:
@@ -141,10 +144,9 @@ class RegistrationServer:
                     return
                 try:
                     payload = json.loads(body)
-                    pfx = _decode_pfx(payload["pfx_base64"])
-                    password = payload["password"]
+                    pfx, password = server.credentials(payload)
                     record = _record_from_payload(payload["cadastro"])
-                except (KeyError, ValueError) as exc:
+                except (KeyError, ValueError, OSError) as exc:
                     self._send(400, "application/json",
                                json.dumps({"error": f"entrada invalida: {exc}"}).encode("utf-8"))
                     return
@@ -164,6 +166,33 @@ class RegistrationServer:
         except KeyboardInterrupt:
             self._httpd.server_close()
             self._cleanup_pending("encerramento com Ctrl+C")
+
+    # ------------------------------------------------------------------- planilha
+    def load_sheet(self, body: bytes) -> "tuple[int, dict]":
+        """Le a planilha enviada pela pagina e devolve as linhas para preencher, sem a senha."""
+        try:
+            payload = json.loads(body)
+            rows = read_sheet(str(payload["nome"]), _decode_pfx(payload["base64"]))
+        except ConfigurationError as exc:
+            return 400, {"error": str(exc)}
+        except (KeyError, ValueError, TypeError):
+            return 400, {"error": "planilha invalida"}
+        self.sheet_rows = {row.linha: row for row in rows}
+        return 200, {"linhas": [row.for_page() for row in rows]}
+
+    def credentials(self, payload: dict) -> "tuple[bytes, str]":
+        """.pfx e senha digitados na pagina; o que faltar vem da linha escolhida da planilha."""
+        row = self.sheet_rows.get(payload.get("planilha_linha")) if payload.get("planilha_linha") else None
+        if payload.get("pfx_base64"):
+            pfx = _decode_pfx(payload["pfx_base64"])
+        elif row and row.certificado:
+            pfx = Path(row.certificado).read_bytes()
+        else:
+            raise ValueError("informe o arquivo .pfx")
+        password = payload.get("password") or (row.senha if row else "")
+        if not password:
+            raise ValueError("informe a senha do certificado")
+        return pfx, password
 
     # ------------------------------------------------------- certificados pendentes
     # O thumbprint (publico, sem segredo) e anotado ANTES da instalacao e apagado depois da
@@ -281,17 +310,6 @@ def _record_from_payload(raw: dict) -> LawyerRecord:
     return lawyer_from_dict(raw)
 
 
-def _sheet_answer(body: bytes) -> "tuple[int, dict]":
-    """Le a planilha enviada pela pagina (so em memoria) e devolve as linhas para preencher."""
-    try:
-        payload = json.loads(body)
-        rows = read_sheet(str(payload["nome"]), _decode_pfx(payload["base64"]))
-    except ConfigurationError as exc:
-        return 400, {"error": str(exc)}
-    except (KeyError, ValueError, TypeError):
-        return 400, {"error": "planilha invalida"}
-    return 200, {"linhas": [asdict(row) for row in rows]}
-
 
 _PAGE = """<!doctype html>
 <html lang="pt-br"><head><meta charset="utf-8">
@@ -395,7 +413,7 @@ $("mode").textContent=MODE==="ensaio"
   :"Modo REAL: o cadastro sera enviado e o termo de compromisso assinado com este certificado.";
 $("go").textContent=MODE==="ensaio"?"Iniciar ensaio":"Iniciar cadastro";
 let pfxB64=null;
-const drop=$("drop"),file=$("pfx");
+const drop=$("drop"),file=$("pfx"),DROP_TEXT=drop.textContent.trim();
 drop.onclick=()=>file.click();
 drop.ondragover=e=>{e.preventDefault();drop.classList.add("has")};
 drop.ondragleave=()=>drop.classList.remove("has");
@@ -426,17 +444,30 @@ function loadSheet(){const f=sheet.files[0];if(!f)return;const r=new FileReader(
     fillFromSheet(0);};
   r.readAsDataURL(f);}
 $("sheetrow").onchange=e=>fillFromSheet(+e.target.value);
-function fillFromSheet(i){const row=sheetRows[i];if(!row)return;const c=row.cadastro,e=c.endereco||{};
+let sheetRow=null;
+function fillFromSheet(i){const row=sheetRows[i];if(!row)return;sheetRow=row;const c=row.cadastro,e=c.endereco||{};
+  // Certificado e senha da planilha ficam no servidor local; aqui so indicamos que existem.
+  if(row.certificado){pfxB64=null;drop.textContent="Certificado da planilha: "+row.certificado.split(/[\\\\/]/).pop()
+    +" (ou arraste outro para trocar)";drop.classList.add("has");}
+  else if(!pfxB64){drop.textContent=DROP_TEXT;drop.classList.remove("has");}
+  $("password").value="";
+  $("password").placeholder=row.tem_senha?"senha da planilha (digite so para trocar)":"";
   const map={nome:c.nome_esperado,cpf:c.cpf_esperado,oab_numero:c.oab_numero,oab_uf:c.oab_uf,email:c.email,
     telefone:c.telefone,autorizacao_ref:c.autorizacao_ref,cep:e.cep,logradouro:e.logradouro,numero:e.numero,
     complemento:e.complemento,bairro:e.bairro,cidade:e.cidade,uf:e.uf};
   Object.entries(map).forEach(([id,v])=>$(id).value=v||"");
   sheetNote(row.erros.length?`Linha ${row.linha}: corrija antes de iniciar - ${row.erros.join("; ")}`
-    :`Linha ${row.linha} carregada. Confira os campos e digite a senha do certificado.`,row.erros.length>0);
+    :`Linha ${row.linha} carregada. Confira os campos`+(row.certificado&&row.tem_senha?" e inicie."
+      :" e informe "+[!row.certificado&&"o .pfx",!row.tem_senha&&"a senha"].filter(Boolean).join(" e ")+"."),
+    row.erros.length>0);
   check();}
-const req=["password","nome","cpf","oab_numero","oab_uf","email","telefone","cep","numero","logradouro","bairro","cidade","uf","autorizacao_ref"];
+$("password").oninput=check;
+const req=["nome","cpf","oab_numero","oab_uf","email","telefone","cep","numero","logradouro","bairro","cidade","uf","autorizacao_ref"];
 req.forEach(id=>$(id).oninput=check);
-function check(){$("go").disabled=!(pfxB64&&req.every(id=>$(id).value.trim())
+function check(){
+  const hasPfx=pfxB64||(sheetRow&&sheetRow.certificado);
+  const hasPassword=$("password").value||(sheetRow&&sheetRow.tem_senha);
+  $("go").disabled=!(hasPfx&&hasPassword&&req.every(id=>$(id).value.trim())
   &&$("autorizacao_ref").value.trim().length>=3)}
 function addStep(text,cls){const li=document.createElement("li");
   li.innerHTML=`<span class="dot ${cls||''}"></span><span>${text}</span>`;$("steps").append(li);}
@@ -455,7 +486,9 @@ $("go").onclick=async()=>{
     else if(m.kind==="done"){const ok=["COMPLETED","ALREADY_REGISTERED","REHEARSAL_OK"].includes(m.status);
       show(ok,m.status+" — "+m.reason);es.close();}
     else if(m.kind==="error"){show(false,m.reason);es.close();}};
-  await fetch("/start",{method:"POST",body:JSON.stringify({pfx_base64:pfxB64,password:$("password").value,cadastro})});
+  const resp=await fetch("/start",{method:"POST",body:JSON.stringify({pfx_base64:pfxB64,password:$("password").value,
+    planilha_linha:sheetRow?sheetRow.linha:null,cadastro})});
+  if(!resp.ok){show(false,(await resp.json()).error);es.close();}
 };
 $("sendcode").onclick=async()=>{await fetch("/code",{method:"POST",body:JSON.stringify({code:$("code").value})});
   $("codebox").classList.add("hidden");};

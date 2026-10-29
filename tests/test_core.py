@@ -304,8 +304,11 @@ if __name__ == "__main__":
 
 
 
-def _xlsx(rows):
-    """Monta um .xlsx minimo em memoria: textos inline e numeros como celula numerica."""
+def _xlsx(rows, links=None):
+    """Monta um .xlsx minimo em memoria: textos inline e numeros como celula numerica.
+
+    links: {"P2": "file:///C:/a.pfx"} vira hyperlink externo na celula.
+    """
     import io
     import zipfile
     from xml.sax.saxutils import escape
@@ -326,7 +329,17 @@ def _xlsx(rows):
         archive.writestr("xl/_rels/workbook.xml.rels",
                          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                          '<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
-        archive.writestr("xl/worksheets/sheet1.xml", f"<worksheet {ns}><sheetData>{body}</sheetData></worksheet>")
+        links = links or {}
+        hyperlinks = "".join(f'<hyperlink ref="{ref}" r:id="rL{i}"/>' for i, ref in enumerate(links))
+        archive.writestr("xl/worksheets/sheet1.xml",
+                         f"<worksheet {ns} {rel}><sheetData>{body}</sheetData>"
+                         + (f"<hyperlinks>{hyperlinks}</hyperlinks>" if links else "") + "</worksheet>")
+        if links:
+            archive.writestr("xl/worksheets/_rels/sheet1.xml.rels",
+                             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                             + "".join(f'<Relationship Id="rL{i}" Type="hyperlink" Target="{escape(target)}" '
+                                       'TargetMode="External"/>' for i, target in enumerate(links.values()))
+                             + "</Relationships>")
     return buffer.getvalue()
 
 
@@ -364,12 +377,41 @@ class SheetTests(unittest.TestCase):
         self.assertIn("cpf_esperado invalido", rows[1].erros)
         self.assertIn("oab_numero obrigatorio", rows[1].erros)
 
-    def test_password_column_is_refused(self) -> None:
+    def test_certificate_path_and_password_from_csv(self) -> None:
         from pje_rpa.planilha import read_sheet
 
-        csv_bytes = "Nome;CPF;Senha do certificado\nMARIA DA SILVA;52998224725;segredo\n".encode("utf-8")
-        with self.assertRaisesRegex(ConfigurationError, "senha"):
-            read_sheet("a.csv", csv_bytes)
+        folder = Path(tempfile.mkdtemp())
+        pfx = folder / "meu certificado.pfx"
+        pfx.write_bytes(b"x")
+        text = (f"Nome;CPF;Certificado;Senha do certificado\n"
+                f'MARIA DA SILVA;52998224725;"{pfx}"; s3nha com espaco \n'
+                f"MARIA DA SILVA;52998224725;{pfx.as_uri()};x\n"
+                f"MARIA DA SILVA;52998224725;{folder / 'falta.pfx'};x\n"
+                f"MARIA DA SILVA;52998224725;meu certificado.pfx;x\n"
+                f"MARIA DA SILVA;52998224725;https://exemplo.com/a.pfx;x\n")
+        rows = read_sheet("a.csv", text.encode("utf-8"))
+        self.assertEqual(rows[0].certificado, str(pfx))
+        self.assertEqual(rows[0].senha, " s3nha com espaco ")
+        self.assertNotIn("s3nha", repr(rows[0]))
+        self.assertEqual(rows[1].certificado, str(pfx))
+        self.assertIn("certificado nao encontrado", rows[2].erros[-1])
+        self.assertIn("caminho completo", rows[3].erros[-1])
+        self.assertIn("nao um link da internet", rows[4].erros[-1])
+        # caminho relativo funciona quando a pasta da planilha e conhecida (CLI)
+        relative = read_sheet("a.csv", text.encode("utf-8"), base_dir=folder)
+        self.assertEqual(relative[3].certificado, str(pfx))
+
+    def test_xlsx_hyperlink_target_wins_over_display_text(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        pfx = Path(tempfile.mkdtemp()) / "a1.pfx"
+        pfx.write_bytes(b"x")
+        data = _xlsx([["Nome", "CPF", "Link do certificado", "Senha"],
+                      ["MARIA DA SILVA", 52998224725, "clique aqui", 12345678]],
+                     links={"C2": pfx.as_uri()})
+        row = read_sheet("a.xlsx", data)[0]
+        self.assertEqual(row.certificado, str(pfx))
+        self.assertEqual(row.senha, "12345678")
 
     def test_csv_cp1252_with_commas(self) -> None:
         from pje_rpa.planilha import read_sheet
@@ -387,15 +429,29 @@ class SheetTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "Linha 5"):
             _load_record(PROJECT / "cadastro.modelo.csv", 5)
 
-    def test_page_endpoint_answers_rows_and_errors(self) -> None:
+    def test_page_never_receives_password_but_start_uses_it(self) -> None:
         import base64
-        from pje_rpa.webapp import _sheet_answer
+        from pje_rpa.webapp import RegistrationServer
 
-        good = json.dumps({"nome": "cadastro.modelo.csv",
-                           "base64": base64.b64encode((PROJECT / "cadastro.modelo.csv").read_bytes()).decode()})
-        status, answer = _sheet_answer(good.encode())
+        server = RegistrationServer(PROJECT / "config.example.toml", Path(tempfile.mkdtemp()), port=0)
+        self.addCleanup(server._httpd.server_close)
+        pfx = Path(tempfile.mkdtemp()) / "a1.pfx"
+        pfx.write_bytes(b"conteudo-pfx")
+        text = f"Nome;CPF;Certificado;Senha\nMARIA DA SILVA;52998224725;{pfx};segredo-da-planilha\n"
+        body = json.dumps({"nome": "a.csv", "base64": base64.b64encode(text.encode()).decode()}).encode()
+
+        status, answer = server.load_sheet(body)
         self.assertEqual(status, 200)
-        self.assertEqual(answer["linhas"][0]["cadastro"]["oab_uf"], "BA")
-        status, answer = _sheet_answer(json.dumps({"nome": "a.pdf", "base64": ""}).encode())
+        self.assertNotIn("segredo-da-planilha", json.dumps(answer))
+        self.assertEqual((answer["linhas"][0]["certificado"], answer["linhas"][0]["tem_senha"]), (str(pfx), True))
+
+        self.assertEqual(server.credentials({"planilha_linha": 2}), (b"conteudo-pfx", "segredo-da-planilha"))
+        # o que for digitado/arrastado na pagina substitui a planilha
+        manual = {"planilha_linha": 2, "password": "outra", "pfx_base64": base64.b64encode(b"outro").decode()}
+        self.assertEqual(server.credentials(manual), (b"outro", "outra"))
+        with self.assertRaisesRegex(ValueError, "senha"):
+            server.credentials({"pfx_base64": base64.b64encode(b"outro").decode()})
+
+        status, answer = server.load_sheet(json.dumps({"nome": "a.pdf", "base64": ""}).encode())
         self.assertEqual(status, 400)
         self.assertIn("xlsx", answer["error"])
