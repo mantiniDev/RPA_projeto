@@ -150,7 +150,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, RunStatus.FAILED)
             log = audit.path.read_text(encoding="utf-8")
             self.assertIn("primeirograu/Painel", log)
-            self.assertIn("BEM-VINDO", log)
+            self.assertIn("Bem-vindo", log)  # caixa preservada: ids/names viram seletores
             page = log.split('"page"')[1]
             self.assertNotIn("ADVOGADO", page)
             self.assertNotIn("529", page)
@@ -302,3 +302,251 @@ class WebAppOriginTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+def _xlsx(rows, links=None):
+    """Monta um .xlsx minimo em memoria: textos inline e numeros como celula numerica.
+
+    links: {"P2": "file:///C:/a.pfx"} vira hyperlink externo na celula.
+    """
+    import io
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    def cell(ref, value):
+        if isinstance(value, (int, float)):
+            return f'<c r="{ref}"><v>{value}</v></c>'
+        return f'<c r="{ref}" t="inlineStr"><is><t>{escape(value)}</t></is></c>'
+
+    body = "".join(
+        f'<row r="{r}">' + "".join(cell(f"{chr(65 + c)}{r}", v) for c, v in enumerate(row)) + "</row>"
+        for r, row in enumerate(rows, start=1))
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    rel = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/workbook.xml", f'<workbook {ns} {rel}><sheets><sheet name="A" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        archive.writestr("xl/_rels/workbook.xml.rels",
+                         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                         '<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        links = links or {}
+        hyperlinks = "".join(f'<hyperlink ref="{ref}" r:id="rL{i}"/>' for i, ref in enumerate(links))
+        archive.writestr("xl/worksheets/sheet1.xml",
+                         f"<worksheet {ns} {rel}><sheetData>{body}</sheetData>"
+                         + (f"<hyperlinks>{hyperlinks}</hyperlinks>" if links else "") + "</worksheet>")
+        if links:
+            archive.writestr("xl/worksheets/_rels/sheet1.xml.rels",
+                             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                             + "".join(f'<Relationship Id="rL{i}" Type="hyperlink" Target="{escape(target)}" '
+                                       'TargetMode="External"/>' for i, target in enumerate(links.values()))
+                             + "</Relationships>")
+    return buffer.getvalue()
+
+
+_HEADER = ["Nome do titular", "CPF", "OAB numero", "OAB UF", "E-mail", "Telefone", "CEP", "Logradouro",
+           "Número", "Complemento", "Bairro", "Cidade", "UF", "Referência da autorização"]
+
+
+class SheetTests(unittest.TestCase):
+    def test_modelo_csv_matches_example_json(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        rows = read_sheet("cadastro.modelo.csv", (PROJECT / "cadastro.modelo.csv").read_bytes())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].linha, 2)
+        self.assertEqual(rows[0].erros, [])
+        from pje_rpa.config import lawyer_from_dict
+        self.assertEqual(lawyer_from_dict(rows[0].cadastro), load_lawyer(PROJECT / "cadastro.example.json"))
+
+    def test_xlsx_restores_lost_zeros_and_splits_oab(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        header = [h for h in _HEADER if h != "OAB UF"]
+        data = _xlsx([header,
+                      ["MARIA DA SILVA", 1234567890, "98.765/sp", "maria@adv.com.br", 11987654321, 1310100,
+                       "AV PAULISTA", 1000, "", "BELA VISTA", "SAO PAULO", "SP", "titular presente"],
+                      [],
+                      ["JOSE SOUZA", 11111111111, "", "x", 1, 1, "", "", "", "", "", "", ""]])
+        rows = read_sheet("advogados.xlsx", data)
+        self.assertEqual([r.linha for r in rows], [2, 4])
+        ok = rows[0]
+        self.assertEqual(ok.erros, [])
+        self.assertEqual(ok.cadastro["cpf_esperado"], "01234567890")
+        self.assertEqual(ok.cadastro["endereco"]["cep"], "01310100")
+        self.assertEqual((ok.cadastro["oab_numero"], ok.cadastro["oab_uf"]), ("98.765", "SP"))
+        self.assertIn("cpf_esperado invalido", rows[1].erros)
+        self.assertIn("oab_numero obrigatorio", rows[1].erros)
+
+    def test_certificate_path_and_password_from_csv(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        folder = Path(tempfile.mkdtemp())
+        pfx = folder / "meu certificado.pfx"
+        pfx.write_bytes(b"x")
+        text = (f"Nome;CPF;Certificado;Senha do certificado\n"
+                f'MARIA DA SILVA;52998224725;"{pfx}"; s3nha com espaco \n'
+                f"MARIA DA SILVA;52998224725;{pfx.as_uri()};x\n"
+                f"MARIA DA SILVA;52998224725;{folder / 'falta.pfx'};x\n"
+                f"MARIA DA SILVA;52998224725;meu certificado.pfx;x\n"
+                f"MARIA DA SILVA;52998224725;https://exemplo.com/a.pfx;x\n")
+        rows = read_sheet("a.csv", text.encode("utf-8"))
+        self.assertEqual(rows[0].certificado, str(pfx))
+        self.assertEqual(rows[0].senha, " s3nha com espaco ")
+        self.assertNotIn("s3nha", repr(rows[0]))
+        self.assertEqual(rows[1].certificado, str(pfx))
+        self.assertIn("certificado nao encontrado", rows[2].erros[-1])
+        self.assertIn("caminho completo", rows[3].erros[-1])
+        self.assertIn("nao um link da internet", rows[4].erros[-1])
+        # caminho relativo funciona quando a pasta da planilha e conhecida (CLI)
+        relative = read_sheet("a.csv", text.encode("utf-8"), base_dir=folder)
+        self.assertEqual(relative[3].certificado, str(pfx))
+
+    def test_xlsx_hyperlink_target_wins_over_display_text(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        pfx = Path(tempfile.mkdtemp()) / "a1.pfx"
+        pfx.write_bytes(b"x")
+        data = _xlsx([["Nome", "CPF", "Link do certificado", "Senha"],
+                      ["MARIA DA SILVA", 52998224725, "clique aqui", 12345678]],
+                     links={"C2": pfx.as_uri()})
+        row = read_sheet("a.xlsx", data)[0]
+        self.assertEqual(row.certificado, str(pfx))
+        self.assertEqual(row.senha, "12345678")
+
+    def test_csv_cp1252_with_commas(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        text = ",".join(_HEADER) + "\nJOÃO PEREIRA,529.982.247-25,123,BA,j@adv.com,(71) 99999-9999,40000-000,RUA A,1,,CENTRO,SALVADOR,BA,ref\n"
+        rows = read_sheet("a.csv", text.encode("cp1252"))
+        self.assertEqual(rows[0].erros, [])
+        self.assertEqual(rows[0].cadastro["nome_esperado"], "JOÃO PEREIRA")
+
+    def test_cli_loads_record_from_sheet_line(self) -> None:
+        from pje_rpa.cli import _load_record
+
+        record = _load_record(PROJECT / "cadastro.modelo.csv", None)
+        self.assertEqual(record.cpf_esperado, "52998224725")
+        with self.assertRaisesRegex(ConfigurationError, "Linha 5"):
+            _load_record(PROJECT / "cadastro.modelo.csv", 5)
+
+    def test_page_never_receives_password_but_start_uses_it(self) -> None:
+        import base64
+        from pje_rpa.webapp import RegistrationServer
+
+        server = RegistrationServer(PROJECT / "config.example.toml", Path(tempfile.mkdtemp()), port=0)
+        self.addCleanup(server._httpd.server_close)
+        pfx = Path(tempfile.mkdtemp()) / "a1.pfx"
+        pfx.write_bytes(b"conteudo-pfx")
+        text = f"Nome;CPF;Certificado;Senha\nMARIA DA SILVA;52998224725;{pfx};segredo-da-planilha\n"
+        body = json.dumps({"nome": "a.csv", "base64": base64.b64encode(text.encode()).decode()}).encode()
+
+        status, answer = server.load_sheet(body)
+        self.assertEqual(status, 200)
+        self.assertNotIn("segredo-da-planilha", json.dumps(answer))
+        self.assertEqual((answer["linhas"][0]["certificado"], answer["linhas"][0]["tem_senha"]), (str(pfx), True))
+
+        self.assertEqual(server.credentials({"planilha_linha": 2}), (b"conteudo-pfx", "segredo-da-planilha", None))
+        # o que for digitado/arrastado na pagina substitui a planilha
+        manual = {"planilha_linha": 2, "password": "outra", "pfx_base64": base64.b64encode(b"outro").decode()}
+        self.assertEqual(server.credentials(manual), (b"outro", "outra", None))
+        with self.assertRaisesRegex(ValueError, "senha"):
+            server.credentials({"pfx_base64": base64.b64encode(b"outro").decode()})
+
+        status, answer = server.load_sheet(json.dumps({"nome": "a.pdf", "base64": ""}).encode())
+        self.assertEqual(status, 400)
+        self.assertIn("xlsx", answer["error"])
+
+
+_RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # "12345678901234567890" (RFC 6238, anexo B)
+
+
+class SecondFactorAndFormTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_config(PROJECT / "config.example.toml")
+        self.record = load_lawyer(PROJECT / "cadastro.example.json")
+
+    def test_totp_matches_rfc6238_vectors(self) -> None:
+        from pje_rpa.totp import parse_totp
+
+        key = parse_totp(_RFC_SECRET.lower()[:16] + " " + _RFC_SECRET.lower()[16:])
+        self.assertEqual(key.code(59), "287082")
+        self.assertEqual(key.code(1111111109), "081804")
+        uri = parse_totp(f"otpauth://totp/PDPJ:fulano?secret={_RFC_SECRET}&digits=8&issuer=PDPJ")
+        self.assertEqual(uri.code(59), "94287082")
+        self.assertNotIn(_RFC_SECRET, repr(key))
+        with self.assertRaisesRegex(ConfigurationError, "expira"):
+            parse_totp("123456")
+        with self.assertRaisesRegex(ConfigurationError, "base32"):
+            parse_totp("nao-e-base32!")
+
+    def test_sheet_reads_2fa_key_and_never_sends_it_to_page(self) -> None:
+        from pje_rpa.planilha import read_sheet
+
+        text = f"Nome;CPF;Chave 2FA\nMARIA DA SILVA;52998224725;{_RFC_SECRET}\nMARIA DA SILVA;52998224725;654321\n"
+        rows = read_sheet("a.csv", text.encode())
+        self.assertEqual(rows[0].chave_2fa, _RFC_SECRET)
+        self.assertNotIn(_RFC_SECRET, json.dumps(rows[0].for_page()))
+        self.assertTrue(rows[0].for_page()["tem_2fa"])
+        self.assertIn("expira", rows[1].erros[-1])
+
+    def test_flow_generates_2fa_code_without_asking_operator(self) -> None:
+        from pje_rpa.totp import parse_totp
+
+        asked = []
+        with tempfile.TemporaryDirectory() as temp:
+            browser = SimulatedBrowser(self.record, "second_factor")
+            flow = PJeRegistrationFlow(self.config, self.record, _info(self.record), "senha", browser,
+                                       SimulatedSigner(browser), AuditLog(Path(temp)),
+                                       code_provider=lambda m: asked.append(m) or "000000",
+                                       rehearsal=True, totp=parse_totp(_RFC_SECRET))
+            result = flow.run()
+            self.assertEqual(result.status, RunStatus.REHEARSAL_OK)
+            self.assertEqual(asked, [])
+            self.assertRegex(browser.values["second_factor_input"], r"^\d{6}$")
+            log = flow.audit.path.read_text(encoding="utf-8")
+            self.assertIn("chave da planilha", log)
+            self.assertNotIn(browser.values["second_factor_input"], log)
+
+    def test_identity_from_page_text_and_split_phone(self) -> None:
+        class TextOnlyBrowser(SimulatedBrowser):
+            """Como o TJAP: nome/CPF so como texto e telefone em DDD + numero."""
+
+            def visible(self, group, timeout_ms=None):
+                if group.startswith("detected_"):
+                    return False
+                if group == "phone_ddd":
+                    return self.stage == "registration"
+                return super().visible(group, timeout_ms)
+
+        config = replace(self.config, selectors={**self.config.selectors, "phone_ddd": ["css=#ddd"]})
+        with tempfile.TemporaryDirectory() as temp:
+            browser = TextOnlyBrowser(self.record, "success")
+            result = _flow(config, self.record, browser, AuditLog(Path(temp)), rehearsal=True).run()
+            self.assertEqual(result.status, RunStatus.REHEARSAL_OK)
+            self.assertEqual(browser.values["phone_ddd"], self.record.telefone[:2])
+            self.assertEqual(browser.values["phone"], self.record.telefone[2:])
+            self.assertEqual(browser.values["cep"], self.record.endereco.cep)
+
+            other = replace(self.record, cpf_esperado="11144477735")
+            browser = TextOnlyBrowser(self.record, "success")
+            flow = PJeRegistrationFlow(config, other, _info(other), "senha", browser, SimulatedSigner(browser),
+                                       AuditLog(Path(temp)), code_provider=lambda m: None, rehearsal=True)
+            self.assertEqual(flow.run().status, RunStatus.BLOCKED)
+
+    def test_fixed_sheet_is_reread_from_disk(self) -> None:
+        from pje_rpa.webapp import RegistrationServer
+
+        folder = Path(tempfile.mkdtemp())
+        (folder / "a1.pfx").write_bytes(b"pfx")
+        sheet = folder / "advogados.csv"
+        sheet.write_text(f"Nome;CPF;Certificado;Senha;Chave 2FA\nMARIA DA SILVA;52998224725;a1.pfx;velha;{_RFC_SECRET}\n",
+                         encoding="utf-8")
+        server = RegistrationServer(PROJECT / "config.example.toml", Path(tempfile.mkdtemp()), port=0,
+                                    sheet_path=sheet)
+        self.addCleanup(server._httpd.server_close)
+        status, answer = server.load_sheet_from_disk()
+        self.assertEqual(status, 200)
+        self.assertEqual(answer["linhas"][0]["certificado"], str((folder / "a1.pfx").resolve()))  # relativo a planilha
+        sheet.write_text(sheet.read_text(encoding="utf-8").replace("velha", "nova"), encoding="utf-8")
+        pfx, password, totp = server.credentials({"planilha_linha": 2})
+        self.assertEqual((pfx, password, totp.code(59)), (b"pfx", "nova", "287082"))

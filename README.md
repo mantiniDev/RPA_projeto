@@ -49,12 +49,17 @@ Estas nao sao contornaveis e sao intencionais:
    allow_live_submission = true
    ```
 6. `scripts\executar-live.ps1` abre a pagina local. Deixe o PJeOffice PRO rodando antes.
+   Os dados do advogado podem ser digitados ou vir de uma planilha `.xlsx`/`.csv` no formato de
+   `cadastro.modelo.csv`, que tambem pode trazer o caminho do `.pfx`, a senha e a chave do
+   autenticador 2FA (o robo gera o codigo sozinho). A planilha e lida direto do disco
+   (`-Planilha`). Veja o `RUNBOOK.md`, secao 5, e o `SECURITY.md`.
 
 ## Limites importantes
 
 - Um A1 identifica seu titular: o cadastro so prossegue se nome e CPF do certificado
   baterem com os dados informados. Nao ha cadastro em massa de terceiros neste projeto.
-- O robo nao recebe nem grava a senha em disco; ela vive apenas durante a execucao.
+- O robo nunca grava a senha; ela vive em memoria durante a execucao. Se vier de planilha,
+  a planilha e um arquivo com a senha em texto e fica sob cuidado do operador (`SECURITY.md`).
 - O modo real exige dominio oficial terminado em `.jus.br` e a referencia da autorizacao
   do advogado (`autorizacao_ref`).
 - O robo nao usa endpoints internos, engenharia reversa ou chamadas privadas do PJe.

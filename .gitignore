@@ -12,3 +12,8 @@ cadastro.json
 
 *.egg-info/
 *.log
+
+# planilhas reais tem dados pessoais
+*.xlsx
+*.csv
+!cadastro.modelo.csv

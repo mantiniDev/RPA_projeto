@@ -27,7 +27,13 @@ from .config import (
 )
 from .flow import PJeRegistrationFlow
 from .models import LawyerRecord, digits
+from .planilha import SheetRow, read_sheet
 from .signer import PJeOfficeSigner
+from .totp import TotpKey, parse_totp
+
+
+# .pfx ou planilha (ate 5 MB) em base64, mais o JSON em volta.
+_MAX_BODY = 8 * 1024 * 1024
 
 
 class _Session:
@@ -50,13 +56,20 @@ class RegistrationServer:
         host: str = "127.0.0.1",
         port: int = 8723,
         rehearsal: bool = False,
+        sheet_path: Path | None = None,
     ) -> None:
         self.config = load_config(config_path)
+        # Planilha fixa (--planilha): a pagina ja abre com ela e o arquivo e relido do disco a cada
+        # uso, entao o que for salvo no Excel vale sem precisar arrastar de novo.
+        self.sheet_path = sheet_path.resolve() if sheet_path else None
         self.audit_root = audit_root
         self.host = host
         self.port = port
         self.rehearsal = rehearsal
         self.session = _Session()
+        # Linhas da ultima planilha carregada, por numero de linha. Ficam so em memoria porque
+        # trazem a senha do certificado, que nunca volta para a pagina.
+        self.sheet_rows: dict[int, SheetRow] = {}
         # Hosts/origens aceitos: bloqueia sites abertos no mesmo navegador e DNS rebinding.
         self._allowed_hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]")}
         server = self
@@ -71,18 +84,29 @@ class RegistrationServer:
                 if self.path == "/":
                     page = _PAGE.replace("__MODE__", "ensaio" if server.rehearsal else "real")
                     self._send(200, "text/html; charset=utf-8", page.encode("utf-8"))
+                elif self.path == "/planilha":
+                    status, answer = server.load_sheet_from_disk()
+                    self._send(status, "application/json", json.dumps(answer, ensure_ascii=False).encode("utf-8"))
                 elif self.path == "/events":
                     self._stream()
                 else:
                     self._send(404, "text/plain", b"nao encontrado")
 
             def do_POST(self):
+                # Le o corpo antes de responder: recusar sem ler faz o Windows abortar a conexao.
+                length = int(self.headers.get("Content-Length", 0))
+                if length > _MAX_BODY:
+                    self.close_connection = True
+                    self._send(413, "text/plain", b"arquivo grande demais")
+                    return
+                body = self.rfile.read(length)
                 if not self._trusted(require_origin=True):
                     return
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
                 if self.path == "/start":
                     self._start(body)
+                elif self.path == "/planilha":
+                    status, answer = server.load_sheet(body)
+                    self._send(status, "application/json", json.dumps(answer, ensure_ascii=False).encode("utf-8"))
                 elif self.path == "/code":
                     try:
                         server.session.code_box.put_nowait((json.loads(body).get("code") or "").strip() or None)
@@ -128,16 +152,15 @@ class RegistrationServer:
                     return
                 try:
                     payload = json.loads(body)
-                    pfx = _decode_pfx(payload["pfx_base64"])
-                    password = payload["password"]
+                    pfx, password, totp = server.credentials(payload)
                     record = _record_from_payload(payload["cadastro"])
-                except (KeyError, ValueError) as exc:
+                except (KeyError, ValueError, OSError) as exc:
                     self._send(400, "application/json",
                                json.dumps({"error": f"entrada invalida: {exc}"}).encode("utf-8"))
                     return
                 server.session = _Session()
                 server.session.running = True
-                threading.Thread(target=server._execute, args=(pfx, password, record), daemon=True).start()
+                threading.Thread(target=server._execute, args=(pfx, password, record, totp), daemon=True).start()
                 self._send(200, "application/json", b'{"ok":true}')
 
         self._httpd = ThreadingHTTPServer((host, port), Handler)
@@ -151,6 +174,54 @@ class RegistrationServer:
         except KeyboardInterrupt:
             self._httpd.server_close()
             self._cleanup_pending("encerramento com Ctrl+C")
+
+    # ------------------------------------------------------------------- planilha
+    def load_sheet(self, body: bytes) -> "tuple[int, dict]":
+        """Le a planilha enviada pela pagina e devolve as linhas para preencher, sem a senha."""
+        try:
+            payload = json.loads(body)
+            rows = read_sheet(str(payload["nome"]), _decode_pfx(payload["base64"]))
+        except ConfigurationError as exc:
+            return 400, {"error": str(exc)}
+        except (KeyError, ValueError, TypeError):
+            return 400, {"error": "planilha invalida"}
+        self.sheet_rows = {row.linha: row for row in rows}
+        return 200, {"linhas": [row.for_page() for row in rows]}
+
+    def load_sheet_from_disk(self) -> "tuple[int, dict]":
+        """Planilha fixa do --planilha, relida do disco (caminho relativo do .pfx vale a partir dela)."""
+        if self.sheet_path is None:
+            return 200, {"linhas": [], "arquivo": None}
+        try:
+            rows = read_sheet(self.sheet_path.name, self.sheet_path.read_bytes(), self.sheet_path.parent)
+        except ConfigurationError as exc:
+            return 400, {"error": str(exc), "arquivo": str(self.sheet_path)}
+        except OSError as exc:
+            return 400, {"error": f"nao foi possivel abrir a planilha ({exc.strerror})", "arquivo": str(self.sheet_path)}
+        self.sheet_rows = {row.linha: row for row in rows}
+        return 200, {"linhas": [row.for_page() for row in rows], "arquivo": str(self.sheet_path)}
+
+    def credentials(self, payload: dict) -> "tuple[bytes, str, TotpKey | None]":
+        """.pfx, senha e chave 2FA: o que for informado na pagina vale; o resto vem da planilha."""
+        if self.sheet_path is not None and payload.get("planilha_linha"):
+            self.load_sheet_from_disk()  # usa o que esta salvo agora, nao o da abertura da pagina
+        row = self.sheet_rows.get(payload.get("planilha_linha")) if payload.get("planilha_linha") else None
+        if payload.get("pfx_base64"):
+            pfx = _decode_pfx(payload["pfx_base64"])
+        elif row and row.certificado:
+            pfx = Path(row.certificado).read_bytes()
+        else:
+            raise ValueError("informe o arquivo .pfx")
+        password = payload.get("password") or (row.senha if row else "")
+        if not password:
+            raise ValueError("informe a senha do certificado")
+        totp = None
+        if row and row.chave_2fa:
+            try:
+                totp = parse_totp(row.chave_2fa)
+            except ConfigurationError as exc:
+                raise ValueError(str(exc)) from exc
+        return pfx, password, totp
 
     # ------------------------------------------------------- certificados pendentes
     # O thumbprint (publico, sem segredo) e anotado ANTES da instalacao e apagado depois da
@@ -185,7 +256,7 @@ class RegistrationServer:
         self._set_pending(remaining)
 
     # ------------------------------------------------------------------ execucao
-    def _execute(self, pfx: bytes, password: str, record: LawyerRecord) -> None:
+    def _execute(self, pfx: bytes, password: str, record: LawyerRecord, totp: "TotpKey | None" = None) -> None:
         session = self.session
         store = WindowsCertificateStore()
         thumbprint = None
@@ -223,6 +294,7 @@ class RegistrationServer:
                 self.config, record, info, password, browser, signer, audit,
                 code_provider=lambda msg: self._ask_code(session, msg),
                 rehearsal=self.rehearsal,
+                totp=totp,
             )
             result = flow.run()
             serialized = asdict(result)
@@ -268,6 +340,7 @@ def _record_from_payload(raw: dict) -> LawyerRecord:
     return lawyer_from_dict(raw)
 
 
+
 _PAGE = """<!doctype html>
 <html lang="pt-br"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -283,11 +356,14 @@ _PAGE = """<!doctype html>
   p.sub{color:var(--muted);margin:0 0 24px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
   label{display:block;font-weight:550;margin:12px 0 4px}
-  input{width:100%;padding:10px 12px;background:#0d0f14;border:1px solid var(--line);
+  input,select{width:100%;padding:10px 12px;background:#0d0f14;border:1px solid var(--line);
         border-radius:8px;color:var(--ink);font:inherit}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .drop{border:1.5px dashed var(--line);border-radius:10px;padding:22px;text-align:center;color:var(--muted);cursor:pointer}
   .drop.has{border-color:var(--accent);color:var(--ink)}
+  #sheetdrop{padding:14px;margin-bottom:4px}
+  #sheetnote:empty,#twofa:empty{display:none}
+  .note.err{color:var(--err)}
   button{margin-top:20px;width:100%;padding:12px;border:0;border-radius:9px;background:var(--accent);
          color:#fff;font:inherit;font-weight:600;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
@@ -310,10 +386,15 @@ _PAGE = """<!doctype html>
   <p class="mode" id="mode"></p>
 
   <div class="card" id="form">
+    <div class="drop" id="sheetdrop">Opcional: arraste a planilha com os dados (.xlsx / .csv) para preencher os campos
+      <input type="file" id="sheet" accept=".xlsx,.csv" class="hidden"></div>
+    <div id="sheetpick" class="hidden"><label>Advogado da planilha</label><select id="sheetrow"></select></div>
+    <p class="note" id="sheetnote"></p>
     <div class="drop" id="drop">Arraste o arquivo .pfx / .p12 aqui ou clique para escolher
       <input type="file" id="pfx" accept=".pfx,.p12" class="hidden"></div>
     <label>Senha do certificado</label>
     <input type="password" id="password" autocomplete="off">
+    <p class="note" id="twofa"></p>
     <div class="row">
       <div><label>Nome do titular</label><input id="nome"></div>
       <div><label>CPF</label><input id="cpf" inputmode="numeric"></div>
@@ -363,7 +444,7 @@ $("mode").textContent=MODE==="ensaio"
   :"Modo REAL: o cadastro sera enviado e o termo de compromisso assinado com este certificado.";
 $("go").textContent=MODE==="ensaio"?"Iniciar ensaio":"Iniciar cadastro";
 let pfxB64=null;
-const drop=$("drop"),file=$("pfx");
+const drop=$("drop"),file=$("pfx"),DROP_TEXT=drop.textContent.trim();
 drop.onclick=()=>file.click();
 drop.ondragover=e=>{e.preventDefault();drop.classList.add("has")};
 drop.ondragleave=()=>drop.classList.remove("has");
@@ -372,9 +453,63 @@ file.onchange=load;
 function load(){const f=file.files[0];if(!f)return;const r=new FileReader();
   r.onload=()=>{pfxB64=r.result.split(",")[1];drop.textContent=f.name;drop.classList.add("has");check()};
   r.readAsDataURL(f);}
-const req=["password","nome","cpf","oab_numero","oab_uf","email","telefone","cep","numero","logradouro","bairro","cidade","uf","autorizacao_ref"];
+// Planilha: lida no servidor local so em memoria; aqui so preenche os campos (que continuam editaveis).
+let sheetRows=[];
+const sheetdrop=$("sheetdrop"),sheet=$("sheet");
+sheetdrop.onclick=()=>sheet.click();
+sheetdrop.ondragover=e=>{e.preventDefault();sheetdrop.classList.add("has")};
+sheetdrop.ondragleave=()=>sheetdrop.classList.remove("has");
+sheetdrop.ondrop=e=>{e.preventDefault();sheet.files=e.dataTransfer.files;loadSheet()};
+sheet.onchange=loadSheet;
+function sheetNote(text,err){$("sheetnote").textContent=text;$("sheetnote").className="note"+(err?" err":"");}
+function loadSheet(){const f=sheet.files[0];if(!f)return;const r=new FileReader();
+  r.onload=async()=>{
+    const resp=await fetch("/planilha",{method:"POST",body:JSON.stringify({nome:f.name,base64:r.result.split(",")[1]})});
+    showSheet(resp,await resp.json(),f.name);};
+  r.readAsDataURL(f);}
+function showSheet(resp,ans,label){
+  if(!resp.ok){sheetNote(ans.error,true);$("sheetpick").classList.add("hidden");return;}
+  const keep=sheetRow?sheetRow.linha:null;
+  sheetRows=ans.linhas;sheetdrop.textContent=label;sheetdrop.classList.add("has");
+  const sel=$("sheetrow");sel.innerHTML="";
+  sheetRows.forEach((row,i)=>sel.add(new Option(`Linha ${row.linha} - ${row.cadastro.nome_esperado||"(sem nome)"}`
+    +(row.erros.length?" - com erros":""),i)));
+  $("sheetpick").classList.toggle("hidden",sheetRows.length<2);
+  const i=Math.max(0,sheetRows.findIndex(row=>row.linha===keep));sel.value=i;fillFromSheet(i);}
+// Planilha fixa (serve --planilha): abre ja carregada e "Recarregar" le de novo o arquivo salvo.
+async function loadFixedSheet(){
+  const resp=await fetch("/planilha");const ans=await resp.json();
+  if(!ans.arquivo)return false;
+  showSheet(resp,ans,"Planilha: "+ans.arquivo+"  (clique para recarregar depois de salvar no Excel)");
+  sheetdrop.onclick=loadFixedSheet;sheetdrop.ondrop=e=>e.preventDefault();return true;}
+loadFixedSheet();
+$("sheetrow").onchange=e=>fillFromSheet(+e.target.value);
+let sheetRow=null;
+function fillFromSheet(i){const row=sheetRows[i];if(!row)return;sheetRow=row;const c=row.cadastro,e=c.endereco||{};
+  // Certificado e senha da planilha ficam no servidor local; aqui so indicamos que existem.
+  if(row.certificado){pfxB64=null;drop.textContent="Certificado da planilha: "+row.certificado.split(/[\\\\/]/).pop()
+    +" (ou arraste outro para trocar)";drop.classList.add("has");}
+  else if(!pfxB64){drop.textContent=DROP_TEXT;drop.classList.remove("has");}
+  $("password").value="";
+  $("password").placeholder=row.tem_senha?"senha da planilha (digite so para trocar)":"";
+  $("twofa").textContent=row.tem_2fa?"Segundo fator: gerado automaticamente pela chave 2FA da planilha."
+    :"Segundo fator: sem chave 2FA na planilha; se o PJe pedir, o codigo sera solicitado aqui.";
+  const map={nome:c.nome_esperado,cpf:c.cpf_esperado,oab_numero:c.oab_numero,oab_uf:c.oab_uf,email:c.email,
+    telefone:c.telefone,autorizacao_ref:c.autorizacao_ref,cep:e.cep,logradouro:e.logradouro,numero:e.numero,
+    complemento:e.complemento,bairro:e.bairro,cidade:e.cidade,uf:e.uf};
+  Object.entries(map).forEach(([id,v])=>$(id).value=v||"");
+  sheetNote(row.erros.length?`Linha ${row.linha}: corrija antes de iniciar - ${row.erros.join("; ")}`
+    :`Linha ${row.linha} carregada. Confira os campos`+(row.certificado&&row.tem_senha?" e inicie."
+      :" e informe "+[!row.certificado&&"o .pfx",!row.tem_senha&&"a senha"].filter(Boolean).join(" e ")+"."),
+    row.erros.length>0);
+  check();}
+$("password").oninput=check;
+const req=["nome","cpf","oab_numero","oab_uf","email","telefone","cep","numero","logradouro","bairro","cidade","uf","autorizacao_ref"];
 req.forEach(id=>$(id).oninput=check);
-function check(){$("go").disabled=!(pfxB64&&req.every(id=>$(id).value.trim())
+function check(){
+  const hasPfx=pfxB64||(sheetRow&&sheetRow.certificado);
+  const hasPassword=$("password").value||(sheetRow&&sheetRow.tem_senha);
+  $("go").disabled=!(hasPfx&&hasPassword&&req.every(id=>$(id).value.trim())
   &&$("autorizacao_ref").value.trim().length>=3)}
 function addStep(text,cls){const li=document.createElement("li");
   li.innerHTML=`<span class="dot ${cls||''}"></span><span>${text}</span>`;$("steps").append(li);}
@@ -393,7 +528,9 @@ $("go").onclick=async()=>{
     else if(m.kind==="done"){const ok=["COMPLETED","ALREADY_REGISTERED","REHEARSAL_OK"].includes(m.status);
       show(ok,m.status+" — "+m.reason);es.close();}
     else if(m.kind==="error"){show(false,m.reason);es.close();}};
-  await fetch("/start",{method:"POST",body:JSON.stringify({pfx_base64:pfxB64,password:$("password").value,cadastro})});
+  const resp=await fetch("/start",{method:"POST",body:JSON.stringify({pfx_base64:pfxB64,password:$("password").value,
+    planilha_linha:sheetRow?sheetRow.linha:null,cadastro})});
+  if(!resp.ok){show(false,(await resp.json()).error);es.close();}
 };
 $("sendcode").onclick=async()=>{await fetch("/code",{method:"POST",body:JSON.stringify({code:$("code").value})});
   $("codebox").classList.add("hidden");};

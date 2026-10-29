@@ -1,5 +1,6 @@
-param(
+﻿param(
     [string]$Tribunal = "",
+    [string]$Planilha = "",
     [string]$Python = ".venv\Scripts\python.exe"
 )
 
@@ -20,8 +21,21 @@ if ($Tribunal) {
 }
 Write-Host "Configuracao: $Config"
 
+# -Planilha: planilha lida direto do disco (a pagina ja abre com ela). Sem o parametro, usa
+# %USERPROFILE%\cadastros-pje\advogados.xlsx ou .csv, se existir.
+if (-not $Planilha) {
+    $Planilha = @("xlsx", "csv") | ForEach-Object { Join-Path $env:USERPROFILE "cadastros-pje\advogados.$_" } |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+$SheetArgs = @()
+if ($Planilha) {
+    if (-not (Test-Path -LiteralPath $Planilha)) { throw "Planilha nao encontrada: $Planilha" }
+    $SheetArgs = @("--planilha", $Planilha)
+    Write-Host "Planilha: $Planilha"
+}
+
 # Ensaio no PJe real: login com o A1, conferencia de nome/CPF/OAB e preenchimento do
 # formulario. Para ANTES de "Confirmar dados": nada e enviado nem assinado.
 # Abra o PJeOffice PRO ANTES desta etapa e deixe-o rodando na bandeja.
 Start-Process "http://127.0.0.1:8723/"
-& $Python -m pje_rpa serve --config $Config --ensaio
+& $Python -m pje_rpa serve --config $Config --ensaio @SheetArgs
